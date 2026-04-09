@@ -13,6 +13,7 @@ defmodule Membrane.AV1.Plugin.Mixfile do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       dialyzer: dialyzer(),
+      compilers: [:unifex, :bundlex] ++ Mix.compilers(),
 
       # hex
       description: "AV1 Plugin for Membrane Framework",
@@ -38,7 +39,10 @@ defmodule Membrane.AV1.Plugin.Mixfile do
   defp deps do
     [
       {:membrane_core, "~> 1.0"},
+      {:unifex, "~> 1.2"},
+      {:membrane_precompiled_dependency_provider, "~> 0.2.2"},
       {:membrane_av1_format, "~> 0.1.0"},
+      {:membrane_raw_video_format, "~> 0.4.0"},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false},
       {:dialyxir, ">= 0.0.0", only: :dev, runtime: false},
       {:credo, ">= 0.0.0", only: :dev, runtime: false}
