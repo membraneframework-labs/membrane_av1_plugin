@@ -1,4 +1,4 @@
-defmodule Membrane.VPx.BundlexProject do
+defmodule Membrane.AV1.BundlexProject do
   use Bundlex.Project
 
   def project() do

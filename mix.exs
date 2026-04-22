@@ -9,11 +9,11 @@ defmodule Membrane.AV1.Plugin.Mixfile do
       app: :membrane_av1_plugin,
       version: @version,
       elixir: "~> 1.13",
+      compilers: [:unifex, :bundlex] ++ Mix.compilers(),
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       dialyzer: dialyzer(),
-      compilers: [:unifex, :bundlex] ++ Mix.compilers(),
 
       # hex
       description: "AV1 Plugin for Membrane Framework",
@@ -41,8 +41,11 @@ defmodule Membrane.AV1.Plugin.Mixfile do
       {:membrane_core, "~> 1.0"},
       {:unifex, "~> 1.2"},
       {:membrane_precompiled_dependency_provider, "~> 0.2.2"},
-      {:membrane_av1_format, "~> 0.1.0"},
+      {:membrane_av1_format, path: "../membrane_av1_format/"},
+      {:membrane_ivf_plugin, path: "../membrane_ivf_plugin/"},
+      # {:membrane_av1_format, "~> 0.1.0"},
       {:membrane_raw_video_format, "~> 0.4.0"},
+      {:membrane_raw_video_parser_plugin, "~> 0.12.1"},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false},
       {:dialyxir, ">= 0.0.0", only: :dev, runtime: false},
       {:credo, ">= 0.0.0", only: :dev, runtime: false}
@@ -69,7 +72,9 @@ defmodule Membrane.AV1.Plugin.Mixfile do
       links: %{
         "GitHub" => @github_url,
         "Membrane Framework Homepage" => "https://membrane.stream"
-      }
+      },
+      files: ["lib", "mix.exs", "README*", "LICENSE*", ".formatter.exs", "bundlex.exs", "c_src"],
+      exclude_patterns: [~r"c_src/.*/_generated.*"]
     ]
   end
 
