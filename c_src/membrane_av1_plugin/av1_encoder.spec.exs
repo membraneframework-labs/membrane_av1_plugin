@@ -35,6 +35,7 @@ spec create(
        profile :: profile,
        tier :: tier,
        level :: unsigned,
+       encoder_mode :: unsigned,
        # pixel_format,
        # encoding_deadline :: unsigned,
        # cpu_used :: int,

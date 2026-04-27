@@ -5,8 +5,10 @@
 #include "unifex/unifex.h"
 #include <assert.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 void handle_destroy_state(UnifexEnv *env, State *state) {
@@ -103,7 +105,7 @@ void free_frames(encoded_frame *frames, unsigned int frames_cnt) {
   unifex_free(frames);
 }
 
-EbSvtIOFormat get_image_from_raw(UnifexPayload *payload, State *state) {
+EbSvtIOFormat get_image_from_payload(UnifexPayload *payload, State *state) {
   uint32_t width = state->width;
   uint32_t height = state->height;
 
@@ -121,15 +123,6 @@ EbSvtIOFormat get_image_from_raw(UnifexPayload *payload, State *state) {
   return image;
 }
 
-void apply_frame_modifiers(frame_modifiers frame_modifiers, State *state) {
-  if (frame_modifiers.change_width != -1) state->width = frame_modifiers.change_width;
-  if (frame_modifiers.change_height != -1) state->height = frame_modifiers.change_height;
-  if (frame_modifiers.change_framerate_numerator != -1)
-    state->framerate_numerator = frame_modifiers.change_framerate_numerator;
-  if (frame_modifiers.change_framerate_denominator != -1)
-    state->framerate_denominator = frame_modifiers.change_framerate_denominator;
-}
-
 UNIFEX_TERM create(
     UnifexEnv *env,
     unsigned int width,
@@ -139,6 +132,7 @@ UNIFEX_TERM create(
     Profile profile,
     Tier tier,
     unsigned int level,
+    unsigned int encoder_mode,
     config_parameter *config_parameters,
     unsigned int config_parameters_length
 ) {
@@ -166,6 +160,7 @@ UNIFEX_TERM create(
   config.profile = (EbAv1SeqProfile)profile;
   config.tier = tier;
   config.level = level;
+  config.enc_mode = encoder_mode;
 
   config.force_key_frames = true;
   config.intra_refresh_type = SVT_AV1_KF_REFRESH; // to force only closed GOP IDRs.
@@ -191,6 +186,92 @@ UNIFEX_TERM create(
   }
 
   return create_result_ok(env, state);
+}
+
+void apply_frame_modifiers(frame_modifiers frame_modifiers, State *state) {
+  if (frame_modifiers.change_width != -1) state->width = frame_modifiers.change_width;
+  if (frame_modifiers.change_height != -1) state->height = frame_modifiers.change_height;
+  if (frame_modifiers.change_framerate_numerator != -1)
+    state->framerate_numerator = frame_modifiers.change_framerate_numerator;
+  if (frame_modifiers.change_framerate_denominator != -1)
+    state->framerate_denominator = frame_modifiers.change_framerate_denominator;
+}
+
+void append_priv_data_node(
+    PrivDataType data_type,
+    void *node_data,
+    size_t data_size,
+    EbPrivDataNode **priv_data_head,
+    EbPrivDataNode **priv_data_tail
+) {
+  EbPrivDataNode *node = malloc(sizeof(EbPrivDataNode));
+  *node =
+      (EbPrivDataNode){.node_type = data_type, .data = node_data, .size = data_size, .next = NULL};
+
+  if (*priv_data_head == NULL) *priv_data_head = node;
+  if (priv_data_tail == NULL) {
+    *priv_data_tail = node;
+  } else {
+    (*priv_data_tail)->next = node;
+    *priv_data_tail = node;
+  }
+}
+
+void free_priv_data(EbPrivDataNode *priv_data_head) {
+  while (priv_data_head) {
+    EbPrivDataNode *priv_data_node = priv_data_head;
+    priv_data_head = priv_data_node->next;
+    free(priv_data_node->data);
+    free(priv_data_node);
+  }
+}
+
+EbPrivDataNode *build_priv_data(
+    frame_modifiers frame_modifiers, bool *force_keyframe, UnifexState *state
+) {
+  EbPrivDataNode *priv_data_head = NULL;
+  EbPrivDataNode *priv_data_tail = NULL;
+  apply_frame_modifiers(frame_modifiers, state);
+
+  if (frame_modifiers.change_height != -1 || frame_modifiers.change_width != -1) {
+
+    SvtAv1InputPicDef *resolution_change = malloc(sizeof(SvtAv1InputPicDef));
+    *resolution_change = (SvtAv1InputPicDef){
+        .input_luma_width = state->width,
+        .input_luma_height = state->height,
+        .input_pad_bottom = 0,
+        .input_pad_right = 0,
+    };
+
+    *force_keyframe = true; // Keyframe has to be forced for the update to take effect.
+
+    append_priv_data_node(
+        RES_CHANGE_EVENT,
+        resolution_change,
+        sizeof(SvtAv1InputPicDef),
+        &priv_data_head,
+        &priv_data_tail
+    );
+  }
+
+  if (frame_modifiers.change_framerate_numerator != -1 ||
+      frame_modifiers.change_framerate_denominator != -1) {
+    SvtAv1FrameRateInfo *framerate_change = malloc(sizeof(SvtAv1FrameRateInfo));
+    *framerate_change = (SvtAv1FrameRateInfo){
+        .frame_rate_numerator = state->framerate_numerator,
+        .frame_rate_denominator = state->framerate_denominator,
+    };
+
+    append_priv_data_node(
+        FRAME_RATE_CHANGE_EVENT,
+        framerate_change,
+        sizeof(SvtAv1FrameRateInfo),
+        &priv_data_head,
+        &priv_data_tail
+    );
+  }
+
+  return priv_data_head;
 }
 
 UNIFEX_TERM get_encoded_frames(UnifexEnv *env, int flushing, UnifexState *state) {
@@ -252,60 +333,16 @@ UNIFEX_TERM encode_frame(
     UnifexState *state
 ) {
   EbErrorType error_type;
+  bool force_keyframe;
 
-  apply_frame_modifiers(frame_modifiers, state);
+  EbPrivDataNode *priv_data_head = build_priv_data(frame_modifiers, &force_keyframe, state);
 
-  bool force_keyframe = frame_modifiers.force_keyframe;
-  EbSvtIOFormat image = get_image_from_raw(payload, state);
-
-  EbPrivDataNode *priv_data_head = NULL;
-  EbPrivDataNode **priv_data_next = NULL;
-
-  if (frame_modifiers.change_height != -1 || frame_modifiers.change_width != -1) {
-
-    SvtAv1InputPicDef resolution_change = {
-        .input_luma_width = state->width,
-        .input_luma_height = state->height,
-        .input_pad_bottom = 0,
-        .input_pad_right = 0,
-    };
-
-    EbPrivDataNode resolution_change_node = {
-        .node_type = RES_CHANGE_EVENT,
-        .data = (void *)&resolution_change,
-        .size = sizeof(SvtAv1InputPicDef),
-        .next = NULL
-    };
-
-    force_keyframe = true; // Keyframe has to be forced for the update to take effect.
-    if (priv_data_head == NULL) priv_data_head = &resolution_change_node;
-    priv_data_next = &resolution_change_node.next;
-  }
-
-  if (frame_modifiers.change_framerate_numerator != -1 ||
-      frame_modifiers.change_framerate_denominator != -1) {
-    SvtAv1FrameRateInfo framerate_change = {
-        .frame_rate_numerator = state->framerate_numerator,
-        .frame_rate_denominator = state->framerate_denominator,
-    };
-
-    EbPrivDataNode framerate_change_node = {
-        .node_type = FRAME_RATE_CHANGE_EVENT,
-        .data = (void *)&framerate_change,
-        .size = sizeof(SvtAv1FrameRateInfo),
-        .next = NULL
-    };
-
-    *priv_data_next = &framerate_change_node;
-    if (priv_data_head == NULL) priv_data_head = &framerate_change_node;
-    priv_data_next = &framerate_change_node.next;
-  }
+  EbSvtIOFormat image = get_image_from_payload(payload, state);
 
   EbBufferHeaderType in_buffer = {
       .size = sizeof(EbBufferHeaderType),
       .p_buffer = (uint8_t *)&image,
       .n_filled_len = payload->size,
-      // .n_filled_len = (uint32_t)(luma_size + 2 * chroma_size),
       .pts = pts,
       .pic_type = force_keyframe ? EB_AV1_KEY_PICTURE : EB_AV1_INVALID_PICTURE,
       .flags = 0,
@@ -318,11 +355,12 @@ UNIFEX_TERM encode_frame(
     );
   }
 
+  free_priv_data(priv_data_head);
+
   return get_encoded_frames(env, 0, state);
 }
 
 UNIFEX_TERM flush(UnifexEnv *env, UnifexState *state) {
-  printf("Flushing\n");
   svt_av1_enc_send_picture(
       state->handle,
       &(EbBufferHeaderType){

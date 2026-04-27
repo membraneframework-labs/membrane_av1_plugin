@@ -15,47 +15,86 @@ defmodule Membrane.AV1.Encoder do
   def_output_pad :output,
     accepted_format: AV1
 
-  def_options profile: [
-                spec: AV1.profile(),
-                default: :main,
+  def_options level: [
+                spec: AV1.level() | :auto,
+                default: :auto,
                 description: """
-                Profile
+                Determines the level of the encoded stream. If not provided, it
+                will be automatically detected from the input stream.
                 """
               ],
-              tier: [
-                spec: AV1.tier(),
-                default: :main,
+              encoder_mode: [
+                spec: 0..13,
+                default: 12,
                 description: """
-                Tier
+                Encoder preset. Higher values increase encoding speed and decrease quality.
                 """
               ],
-              level: [
-                spec: String.t() | nil,
-                default: nil,
+              rate_control: [
+                spec:
+                  {:cqp | :crf, quantization_parameter :: 0..63}
+                  | {:cbr | :vbr, target_bitrate :: non_neg_integer()},
+                default: {:cbr, 50},
                 description: """
-                level
+                Rate control mode used by the encoder:
+                - CQP (Constant Quantization Parameter) - The same quantization parameter
+                  is used for each frame. Higher values mean higher compression.
+                - CRF (Constant Rate Factor) - Quantization parameter (which controls the compression level)
+                is adjusted for each frame to maintain a certain level of perceived quality. Higher
+                values mean higher compression.
+                - CBR (Constant Bit Rate) - Provided bitrate is maintained for each frame
+                  for the whole stream. Suitable for live-streaming.
+                - VBR (Variable Bit Rate) - The encoder will aim to produce a stream with the
+                  average bitrate of the provided value, varying the size of the output depending on
+                  the complexity of the input.
                 """
               ],
               framerate: [
                 spec: AV1.framerate() | nil,
                 default: nil,
                 description: """
-                Used if not present in stream format. Framerate needs to be provided in one of these two
-                places.
+                Used by the encoder if not present in stream format. Framerate MUST be provided in one of these two places.
                 """
               ],
               config_parameters: [
                 spec: %{String.t() => String.t()},
                 default: %{},
                 description: """
-                Parameters accepted by SVT-AV1 encoder.
+                Parameters accepted by SVT-AV1 encoder. For possible values refer to
+                EbSvtAv1EncConfiguration struct located in EbSvtAv1Enc.h.
+                (https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Source/API/EbSvtAv1Enc.h)
                 """
               ]
 
   @type encoded_frame :: %{payload: binary(), pts: non_neg_integer(), is_keyframe: boolean()}
 
+  # The only profile currently supported by the encoder.
+  @profile :main
+
+  # Tier is always assumed to be main by the encoder.
+  @tier :main
+
+  @level_to_config_number %{
+    auto: 0,
+    "2.0": 20,
+    "2.1": 21,
+    "3.0": 30,
+    "3.1": 31,
+    "4.0": 40,
+    "4.1": 41,
+    "5.0": 50,
+    "5.1": 51,
+    "5.2": 52,
+    "5.3": 53,
+    "6.0": 60,
+    "6.1": 61,
+    "6.2": 62,
+    "6.3": 63
+  }
+
   defmodule FrameModifiers do
     @moduledoc false
+
     @type t :: %__MODULE__{
             force_keyframe: bool,
             change_height: integer(),
@@ -73,7 +112,9 @@ defmodule Membrane.AV1.Encoder do
 
   defmodule ConfigParameter do
     @moduledoc false
+
     @enforce_keys [:key, :value]
+
     defstruct @enforce_keys
   end
 
@@ -84,18 +125,19 @@ defmodule Membrane.AV1.Encoder do
             profile: AV1.profile(),
             tier: AV1.tier(),
             level: AV1.level(),
+            encoder_mode: 0..13,
             options_framerate: AV1.framerate(),
             config_parameters: %{String.t() => String.t()},
             encoder_ref: reference() | nil,
             previous_input_stream_format: RawVideo.t() | nil,
             frame_modifiers: FrameModifiers.t()
-            # force_next_keyframe: boolean()
           }
 
     @enforce_keys [
       :profile,
       :tier,
       :level,
+      :encoder_mode,
       :options_framerate,
       :config_parameters,
       :frame_modifiers
@@ -111,9 +153,10 @@ defmodule Membrane.AV1.Encoder do
   def handle_init(_ctx, opts) do
     {[],
      %State{
-       profile: opts.profile,
-       tier: opts.tier,
+       profile: @profile,
+       tier: @tier,
        level: opts.level,
+       encoder_mode: opts.encoder_mode,
        options_framerate: opts.framerate,
        config_parameters: opts.config_parameters,
        frame_modifiers: %FrameModifiers{}
@@ -141,6 +184,7 @@ defmodule Membrane.AV1.Encoder do
         state.profile,
         state.tier,
         level,
+        state.encoder_mode,
         config_parameters_list
       )
 
@@ -232,17 +276,11 @@ defmodule Membrane.AV1.Encoder do
     {[buffer: {:output, buffers}, end_of_stream: :output], state}
   end
 
-  @spec translate_level(Membrane.AV1.level() | nil) :: non_neg_integer()
-  defp translate_level(nil) do
-    0
-  end
-
+  @spec translate_level(Membrane.AV1.level() | :auto) :: non_neg_integer()
   defp translate_level(level) do
-    if level in Membrane.AV1.valid_levels() do
-      {level_number, ""} = level |> String.replace(".", "") |> Integer.parse()
-      level_number
-    else
-      raise "Level #{inspect(level)} is not valid"
+    case Map.get(@level_to_config_number, level) do
+      nil -> raise "Level #{inspect(level)} is not valid"
+      level_number -> level_number
     end
   end
 
