@@ -13,4 +13,3 @@
   ],
   import_deps: [:membrane_core]
 ]
-

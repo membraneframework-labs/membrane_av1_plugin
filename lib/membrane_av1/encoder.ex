@@ -31,9 +31,7 @@ defmodule Membrane.AV1.Encoder do
                 """
               ],
               rate_control: [
-                spec:
-                  {:cqp | :crf, quantization_parameter :: 0..63}
-                  | {:cbr | :vbr, target_bitrate :: non_neg_integer()},
+                spec: rate_control(),
                 default: {:cbr, 50},
                 description: """
                 Rate control mode used by the encoder:
@@ -68,11 +66,9 @@ defmodule Membrane.AV1.Encoder do
 
   @type encoded_frame :: %{payload: binary(), pts: non_neg_integer(), is_keyframe: boolean()}
 
-  # The only profile currently supported by the encoder.
-  @profile :main
-
-  # Tier is always assumed to be main by the encoder.
-  @tier :main
+  @type rate_control ::
+          {:cqp | :crf, quantization_parameter :: 0..63}
+          | {:cbr | :vbr, target_bitrate :: non_neg_integer()}
 
   @level_to_config_number %{
     auto: 0,
@@ -96,15 +92,13 @@ defmodule Membrane.AV1.Encoder do
     @moduledoc false
 
     @type t :: %__MODULE__{
-            force_keyframe: bool,
             change_height: integer(),
             change_width: integer(),
             change_framerate_numerator: integer(),
             change_framerate_denominator: integer()
           }
 
-    defstruct force_keyframe: false,
-              change_height: -1,
+    defstruct change_height: -1,
               change_width: -1,
               change_framerate_numerator: -1,
               change_framerate_denominator: -1
@@ -122,21 +116,28 @@ defmodule Membrane.AV1.Encoder do
     @moduledoc false
 
     @type t :: %__MODULE__{
-            profile: AV1.profile(),
-            tier: AV1.tier(),
+            # The encoder currently supports only :main profile, which is the default, so there's no
+            # need to set it explicitly
+            # profile: AV1.profile(),
+            # The encoder always assumes :main tier, which is the default, so there's no
+            # need to set it explicitly
+            # tier: AV1.tier(),
             level: AV1.level(),
+            rate_control: AV1.Encoder.rate_control(),
             encoder_mode: 0..13,
             options_framerate: AV1.framerate(),
             config_parameters: %{String.t() => String.t()},
             encoder_ref: reference() | nil,
             previous_input_stream_format: RawVideo.t() | nil,
-            frame_modifiers: FrameModifiers.t()
+            frame_modifiers: FrameModifiers.t(),
+            force_next_keyframe: boolean()
           }
 
     @enforce_keys [
-      :profile,
-      :tier,
+      # :profile,
+      # :tier,
       :level,
+      :rate_control,
       :encoder_mode,
       :options_framerate,
       :config_parameters,
@@ -145,7 +146,8 @@ defmodule Membrane.AV1.Encoder do
     defstruct @enforce_keys ++
                 [
                   encoder_ref: nil,
-                  previous_input_stream_format: nil
+                  previous_input_stream_format: nil,
+                  force_next_keyframe: false
                 ]
   end
 
@@ -153,9 +155,8 @@ defmodule Membrane.AV1.Encoder do
   def handle_init(_ctx, opts) do
     {[],
      %State{
-       profile: @profile,
-       tier: @tier,
        level: opts.level,
+       rate_control: opts.rate_control,
        encoder_mode: opts.encoder_mode,
        options_framerate: opts.framerate,
        config_parameters: opts.config_parameters,
@@ -165,15 +166,29 @@ defmodule Membrane.AV1.Encoder do
 
   @impl true
   def handle_stream_format(:input, stream_format, _ctx, %State{encoder_ref: nil} = state) do
-    config_parameters_list =
+    %RawVideo{framerate: {framerate_num, framerate_denom}} =
+      stream_format =
+      resolve_framerate(stream_format, state.options_framerate)
+
+    level = translate_level(state.level)
+
+    {rate_control_mode, target_bit_rate, qp, aq_mode} = translate_rate_control(state.rate_control)
+
+    internal_config_parameters_list =
+      [
+        {"level", Integer.to_string(level)},
+        {"encoder_mode", Integer.to_string(state.encoder_mode)},
+        {"rate_control_mode", Integer.to_string(rate_control_mode)},
+        {"target_bit_rate", Integer.to_string(target_bit_rate)},
+        {"qp", Integer.to_string(qp)},
+        {"aq_mode", Integer.to_string(aq_mode)}
+      ]
+      |> Enum.map(fn {key, value} -> %ConfigParameter{key: key, value: value} end)
+
+    user_config_parameters_list =
       Enum.map(state.config_parameters, fn {key, value} ->
         %ConfigParameter{key: key, value: value}
       end)
-
-    %RawVideo{framerate: {framerate_num, framerate_denom}} = stream_format
-    resolve_framerate(stream_format, state.options_framerate)
-
-    level = translate_level(state.level)
 
     {:ok, encoder_ref} =
       Native.create(
@@ -181,11 +196,9 @@ defmodule Membrane.AV1.Encoder do
         stream_format.height,
         framerate_num,
         framerate_denom,
-        state.profile,
-        state.tier,
-        level,
-        state.encoder_mode,
-        config_parameters_list
+        # level,
+        # state.encoder_mode,
+        internal_config_parameters_list ++ user_config_parameters_list
       )
 
     output_stream_format =
@@ -193,8 +206,8 @@ defmodule Membrane.AV1.Encoder do
         height: stream_format.height,
         width: stream_format.width,
         framerate: stream_format.framerate,
-        profile: state.profile,
-        tier: state.tier,
+        profile: :main,
+        tier: :main,
         level: state.level
       }
 
@@ -245,6 +258,7 @@ defmodule Membrane.AV1.Encoder do
       Native.encode_frame(
         buffer.payload,
         buffer.pts,
+        state.force_next_keyframe,
         state.frame_modifiers,
         state.encoder_ref
       )
@@ -256,7 +270,7 @@ defmodule Membrane.AV1.Encoder do
 
   @impl true
   def handle_event(:output, %KeyframeRequestEvent{}, _ctx, %State{} = state) do
-    {[], put_in(state.frame_modifiers.force_keyframe, true)}
+    {[], %State{state | force_next_keyframe: true}}
   end
 
   @impl true
@@ -281,6 +295,23 @@ defmodule Membrane.AV1.Encoder do
     case Map.get(@level_to_config_number, level) do
       nil -> raise "Level #{inspect(level)} is not valid"
       level_number -> level_number
+    end
+  end
+
+  @spec translate_rate_control(rate_control()) :: {
+          # 0=CQP/CRF, 1=VBR, 2=CBR
+          rate_control_mode :: 0..2,
+          target_bit_rate :: non_neg_integer(),
+          qp :: 0..63,
+          # 0=CQP, 2=CRF
+          aq_mode :: 0..2
+        }
+  defp translate_rate_control(rate_control) do
+    case rate_control do
+      {:cqp, quantization_parameter} -> {0, 0, quantization_parameter, 0}
+      {:crf, quantization_parameter} -> {0, 0, quantization_parameter, 2}
+      {:vbr, target_bitrate} -> {1, target_bitrate, 0, 0}
+      {:cbr, target_bitrate} -> {2, target_bitrate, 0, 0}
     end
   end
 
@@ -339,10 +370,11 @@ defmodule Membrane.AV1.Encoder do
 
   @spec get_buffers_from_frames([encoded_frame()]) :: [Buffer.t()]
   defp get_buffers_from_frames(encoded_frames) do
-    Enum.map(encoded_frames, fn %{payload: payload, pts: pts, is_keyframe: is_keyframe} ->
+    Enum.map(encoded_frames, fn %{payload: payload, pts: pts, dts: dts, is_keyframe: is_keyframe} ->
       %Buffer{
         payload: payload,
         pts: Membrane.Time.nanoseconds(pts),
+        dts: Membrane.Time.nanoseconds(dts),
         metadata: %{av1: %{is_keyframe: is_keyframe}}
       }
     end)

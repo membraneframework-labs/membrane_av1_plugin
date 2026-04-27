@@ -129,10 +129,10 @@ UNIFEX_TERM create(
     unsigned int height,
     unsigned int framerate_numerator,
     unsigned int framerate_denominator,
-    Profile profile,
-    Tier tier,
-    unsigned int level,
-    unsigned int encoder_mode,
+    // Profile profile,
+    // Tier tier,
+    // unsigned int level,
+    // unsigned int encoder_mode,
     config_parameter *config_parameters,
     unsigned int config_parameters_length
 ) {
@@ -157,10 +157,10 @@ UNIFEX_TERM create(
   config.frame_rate_numerator = framerate_numerator;
   config.frame_rate_denominator = framerate_denominator;
 
-  config.profile = (EbAv1SeqProfile)profile;
-  config.tier = tier;
-  config.level = level;
-  config.enc_mode = encoder_mode;
+  // config.profile = (EbAv1SeqProfile)profile;
+  // config.tier = tier;
+  // config.level = level;
+  // config.enc_mode = encoder_mode;
 
   config.force_key_frames = true;
   config.intra_refresh_type = SVT_AV1_KF_REFRESH; // to force only closed GOP IDRs.
@@ -209,7 +209,7 @@ void append_priv_data_node(
       (EbPrivDataNode){.node_type = data_type, .data = node_data, .size = data_size, .next = NULL};
 
   if (*priv_data_head == NULL) *priv_data_head = node;
-  if (priv_data_tail == NULL) {
+  if (*priv_data_tail == NULL) {
     *priv_data_tail = node;
   } else {
     (*priv_data_tail)->next = node;
@@ -227,7 +227,7 @@ void free_priv_data(EbPrivDataNode *priv_data_head) {
 }
 
 EbPrivDataNode *build_priv_data(
-    frame_modifiers frame_modifiers, bool *force_keyframe, UnifexState *state
+    frame_modifiers frame_modifiers, int *force_keyframe, UnifexState *state
 ) {
   EbPrivDataNode *priv_data_head = NULL;
   EbPrivDataNode *priv_data_tail = NULL;
@@ -329,11 +329,11 @@ UNIFEX_TERM encode_frame(
     UnifexEnv *env,
     UnifexPayload *payload,
     int64_t pts,
+    int force_keyframe,
     frame_modifiers frame_modifiers,
     UnifexState *state
 ) {
   EbErrorType error_type;
-  bool force_keyframe;
 
   EbPrivDataNode *priv_data_head = build_priv_data(frame_modifiers, &force_keyframe, state);
 
@@ -361,12 +361,18 @@ UNIFEX_TERM encode_frame(
 }
 
 UNIFEX_TERM flush(UnifexEnv *env, UnifexState *state) {
-  svt_av1_enc_send_picture(
-      state->handle,
-      &(EbBufferHeaderType){
-          .flags = EB_BUFFERFLAG_EOS,
-          .pic_type = EB_AV1_INVALID_PICTURE,
-      }
-  );
-  return get_encoded_frames(env, 1, state);
+  EbErrorType error_type;
+  if ((error_type = svt_av1_enc_send_picture(
+           state->handle,
+           &(EbBufferHeaderType){
+               .flags = EB_BUFFERFLAG_EOS,
+               .pic_type = EB_AV1_INVALID_PICTURE,
+           }
+       ))) {
+    return result_error(
+        env, "Error sending EOS sentinel to the encoder", error_type, flush_result_error, state
+    );
+  } else {
+    return get_encoded_frames(env, 1, state);
+  }
 }
