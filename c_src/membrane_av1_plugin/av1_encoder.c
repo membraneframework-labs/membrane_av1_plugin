@@ -1,5 +1,5 @@
-#include "av1_encoder.h"
 #include "membrane_av1_plugin/_generated/nif/av1_encoder.h"
+#include "av1_encoder.h"
 #include "svt-av1/EbSvtAv1.h"
 #include "svt-av1/EbSvtAv1Enc.h"
 #include "unifex/unifex.h"
@@ -111,6 +111,7 @@ EbSvtIOFormat get_image_from_payload(UnifexPayload *payload, State *state) {
 
   size_t luma_size = (size_t)width * height;
   size_t chroma_size = (width / 2) * (height / 2);
+  assert(payload->size == luma_size + chroma_size * 2);
 
   EbSvtIOFormat image = {
       .luma = payload->data,
@@ -129,10 +130,7 @@ UNIFEX_TERM create(
     unsigned int height,
     unsigned int framerate_numerator,
     unsigned int framerate_denominator,
-    // Profile profile,
-    // Tier tier,
-    // unsigned int level,
-    // unsigned int encoder_mode,
+    PredictionStructure prediction_structure,
     config_parameter *config_parameters,
     unsigned int config_parameters_length
 ) {
@@ -140,6 +138,8 @@ UNIFEX_TERM create(
   EbSvtAv1EncConfiguration config;
   char error_buf[256];
   EbErrorType error_type;
+
+  setenv("SVT_LOG", "2", 0); // Limit log severity to warnings
 
   if ((error_type = svt_av1_enc_init_handle(&state->handle, &config))) {
     return result_error(
@@ -151,19 +151,13 @@ UNIFEX_TERM create(
   state->height = height;
   state->framerate_numerator = framerate_numerator;
   state->framerate_denominator = framerate_denominator;
+  state->pred_structure = (PredStructure)prediction_structure;
 
   config.source_width = width;
   config.source_height = height;
   config.frame_rate_numerator = framerate_numerator;
   config.frame_rate_denominator = framerate_denominator;
-
-  // config.profile = (EbAv1SeqProfile)profile;
-  // config.tier = tier;
-  // config.level = level;
-  // config.enc_mode = encoder_mode;
-
-  config.force_key_frames = true;
-  config.intra_refresh_type = SVT_AV1_KF_REFRESH; // to force only closed GOP IDRs.
+  config.pred_structure = (PredStructure)prediction_structure;
 
   for (unsigned int i = 0; i < config_parameters_length; i++) {
     char *key = config_parameters[i].key;
@@ -173,6 +167,10 @@ UNIFEX_TERM create(
       snprintf(error_buf, sizeof(error_buf), "Error setting parameter %s: %s", key, value);
       return result_error(env, error_buf, error_type, create_result_error, state);
     }
+  }
+  if (!config.rtc && config.intra_refresh_type == SVT_AV1_KF_REFRESH &&
+      config.pred_structure != LOW_DELAY && config.rate_control_mode != SVT_AV1_RC_MODE_CBR) {
+    config.force_key_frames = true;
   }
 
   if ((error_type = svt_av1_enc_set_parameter(state->handle, &config))) {
@@ -189,12 +187,13 @@ UNIFEX_TERM create(
 }
 
 void apply_frame_modifiers(frame_modifiers frame_modifiers, State *state) {
-  if (frame_modifiers.change_width != -1) state->width = frame_modifiers.change_width;
-  if (frame_modifiers.change_height != -1) state->height = frame_modifiers.change_height;
+  if (frame_modifiers.change_width != -1) state->width = (unsigned int)frame_modifiers.change_width;
+  if (frame_modifiers.change_height != -1)
+    state->height = (unsigned int)frame_modifiers.change_height;
   if (frame_modifiers.change_framerate_numerator != -1)
-    state->framerate_numerator = frame_modifiers.change_framerate_numerator;
+    state->framerate_numerator = (unsigned int)frame_modifiers.change_framerate_numerator;
   if (frame_modifiers.change_framerate_denominator != -1)
-    state->framerate_denominator = frame_modifiers.change_framerate_denominator;
+    state->framerate_denominator = (unsigned int)frame_modifiers.change_framerate_denominator;
 }
 
 void append_priv_data_node(
@@ -231,7 +230,6 @@ EbPrivDataNode *build_priv_data(
 ) {
   EbPrivDataNode *priv_data_head = NULL;
   EbPrivDataNode *priv_data_tail = NULL;
-  apply_frame_modifiers(frame_modifiers, state);
 
   if (frame_modifiers.change_height != -1 || frame_modifiers.change_width != -1) {
 
@@ -281,30 +279,54 @@ UNIFEX_TERM get_encoded_frames(UnifexEnv *env, int flushing, UnifexState *state)
   unsigned int allocated_frames = 1;
   encoded_frame *encoded_frames = unifex_alloc(allocated_frames * sizeof(encoded_frame));
   EbBufferHeaderType *out_buffer;
-  bool eos_sentinel_received = false;
 
-  while ((error_type = svt_av1_enc_get_packet(state->handle, &out_buffer, flushing)) ==
-             EB_ErrorNone &&
-         out_buffer->n_filled_len > 0 && !eos_sentinel_received) {
+  bool is_eos_sentinel;
+  bool is_alt_ref;
+  bool continue_draining;
+
+  // When not using LOW_DELAY, the decoder should be drained until svt_av1_enc_get_packet returns
+  // EB_NoErrorEmptyQueue.
+  // When using LOW_DELAY, svt_av1_enc_get_packet is blocking and is guaranteed to produce a
+  // single frame to display, which can be accompanied by a number of alt-frames.
+  //
+  // When flushing the encoder, pic_send_done should be set to 1, which also makes
+  // svt_av1_enc_get_packet blocking. The function should continue to be called until it produces an
+  // EOS sentinel - a packet with EB_BUFFERFLAG_EOS flag. This packet can contain data, but doesn't
+  // have to.
+  do {
+    error_type = svt_av1_enc_get_packet(state->handle, &out_buffer, flushing);
+    if (error_type != EB_ErrorNone) break;
 
     if (frames_cnt >= allocated_frames) {
       allocated_frames *= 2;
       encoded_frames = unifex_realloc(encoded_frames, allocated_frames * sizeof(encoded_frame));
     }
 
-    encoded_frame *frame = &encoded_frames[frames_cnt];
-    frame->payload = unifex_alloc(sizeof(UnifexPayload));
-    unifex_payload_alloc(env, UNIFEX_PAYLOAD_BINARY, out_buffer->n_filled_len, frame->payload);
-    memcpy(frame->payload->data, out_buffer->p_buffer, out_buffer->n_filled_len);
-    frame->pts = out_buffer->pts;
-    frame->dts = out_buffer->dts;
-    frame->is_keyframe = out_buffer->pic_type == EB_AV1_KEY_PICTURE;
+    is_eos_sentinel = out_buffer->flags & EB_BUFFERFLAG_EOS;
+    is_alt_ref = out_buffer->flags & EB_BUFFERFLAG_IS_ALT_REF;
 
-    eos_sentinel_received = out_buffer->flags & EB_BUFFERFLAG_EOS;
+    if (out_buffer->n_filled_len > 0) {
+      encoded_frame *frame = &encoded_frames[frames_cnt];
+      frame->payload = unifex_alloc(sizeof(UnifexPayload));
+      unifex_payload_alloc(env, UNIFEX_PAYLOAD_BINARY, out_buffer->n_filled_len, frame->payload);
+      memcpy(frame->payload->data, out_buffer->p_buffer, out_buffer->n_filled_len);
+      frame->pts = out_buffer->pts;
+      frame->dts = out_buffer->dts;
+      frame->is_keyframe = out_buffer->pic_type == EB_AV1_KEY_PICTURE;
+      frames_cnt++;
+    }
+
     svt_av1_enc_release_out_buffer(&out_buffer);
 
-    frames_cnt++;
-  }
+    if (flushing) {
+      continue_draining = !is_eos_sentinel;
+    } else if (state->pred_structure == LOW_DELAY) {
+      continue_draining = is_alt_ref;
+    } else {
+      continue_draining = true;
+    }
+
+  } while (continue_draining);
 
   UNIFEX_TERM (*error_fun)(UnifexEnv *, const char *) =
       flushing ? flush_result_error : encode_frame_result_error;
@@ -318,7 +340,7 @@ UNIFEX_TERM get_encoded_frames(UnifexEnv *env, int flushing, UnifexState *state)
     result = success_fun(env, encoded_frames, frames_cnt);
   } else {
     svt_av1_enc_release_out_buffer(&out_buffer);
-    result = result_error(env, "Error retreiving encoded frame", error_type, error_fun, state);
+    result = result_error(env, "Error retrieving encoded frame", error_type, error_fun, state);
   }
 
   free_frames(encoded_frames, frames_cnt);
@@ -334,6 +356,8 @@ UNIFEX_TERM encode_frame(
     UnifexState *state
 ) {
   EbErrorType error_type;
+
+  apply_frame_modifiers(frame_modifiers, state);
 
   EbPrivDataNode *priv_data_head = build_priv_data(frame_modifiers, &force_keyframe, state);
 

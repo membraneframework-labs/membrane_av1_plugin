@@ -1,7 +1,8 @@
 #pragma once
 #include "svt-av1/EbSvtAv1.h"
-// #include "svt-av1/EbSvtAv1Enc.h"
+#include "svt-av1/EbSvtAv1Enc.h"
 #include <erl_nif.h>
+#include <stdbool.h>
 
 typedef struct State {
   EbComponentType *handle;
@@ -9,7 +10,7 @@ typedef struct State {
   unsigned int width;
   unsigned int framerate_numerator;
   unsigned int framerate_denominator;
-  unsigned int encoding_deadline;
+  PredStructure pred_structure;
 } State;
 
 #include "_generated/av1_encoder.h"

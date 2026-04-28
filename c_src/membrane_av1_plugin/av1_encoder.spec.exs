@@ -2,10 +2,7 @@ module Membrane.AV1.Encoder.Native
 
 state_type "State"
 
-# type pixel_format :: :I420 | :I422 | :I444 | :NV12 | :YV12
-type profile :: :main | :high | :professional
-
-type tier :: :main | :high
+type prediction_structure :: :all_intra | :low_delay | :random_access
 
 type encoded_frame :: %EncodedFrame{
        payload: payload,
@@ -31,13 +28,7 @@ spec create(
        height :: unsigned,
        framerate_numerator :: unsigned,
        framerate_denominator :: unsigned,
-       # profile :: profile,
-       # tier :: tier,
-       # level :: unsigned,
-       # encoder_mode :: unsigned,
-       # pixel_format,
-       # encoding_deadline :: unsigned,
-       # cpu_used :: int,
+       prediction_structure :: prediction_structure,
        config_parameters :: [config_parameter]
      ) :: {:ok :: label, state} | {:error :: label, reason :: atom}
 

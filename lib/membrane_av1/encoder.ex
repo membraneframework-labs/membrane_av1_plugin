@@ -15,24 +15,26 @@ defmodule Membrane.AV1.Encoder do
   def_output_pad :output,
     accepted_format: AV1
 
-  def_options level: [
-                spec: AV1.level() | :auto,
-                default: :auto,
-                description: """
-                Determines the level of the encoded stream. If not provided, it
-                will be automatically detected from the input stream.
-                """
-              ],
-              encoder_mode: [
+  def_options encoder_mode: [
                 spec: 0..13,
-                default: 12,
+                default: 8,
                 description: """
                 Encoder preset. Higher values increase encoding speed and decrease quality.
                 """
               ],
+              real_time_coding: [
+                spec: boolean(),
+                default: false,
+                description: """
+                Applies a set of speed and latency optimizations, so that the stream is
+                more suitable for real-time applications. Forces `:low_delay` value for
+                `:prediction_structure` option. It's intended to be used with CBR rate control
+                (see `:rate_control` option).
+                """
+              ],
               rate_control: [
                 spec: rate_control(),
-                default: {:cbr, 50},
+                default: {:crf, 35},
                 description: """
                 Rate control mode used by the encoder:
                 - CQP (Constant Quantization Parameter) - The same quantization parameter
@@ -41,10 +43,39 @@ defmodule Membrane.AV1.Encoder do
                 is adjusted for each frame to maintain a certain level of perceived quality. Higher
                 values mean higher compression.
                 - CBR (Constant Bit Rate) - Provided bitrate is maintained for each frame
-                  for the whole stream. Suitable for live-streaming.
+                  for the whole stream. Suitable for live-streaming. `:prediction_structure` option
+                MUST be set to :low_delay.
                 - VBR (Variable Bit Rate) - The encoder will aim to produce a stream with the
                   average bitrate of the provided value, varying the size of the output depending on
                   the complexity of the input.
+                """
+              ],
+              prediction_structure: [
+                spec: prediction_structure(),
+                default: :random_access,
+                description: """
+                Prediction structure used when encoding the stream:
+                - `:all_intra` - Every frame is an intra frame.
+                - `:low_delay` - Frames can only reference previous frames. Additionally no frames
+                  are buffered, each input frame will result in an encoded output frame.
+                - `:random_access` - B-frames are allowed.
+                """
+              ],
+              enable_forcing_keyframes: [
+                spec: boolean(),
+                default: true,
+                description: """
+                To enable the encoder to force keyframes, intra refresh points have to be true
+                keyframes, not just intra-only frames, in order to make them independently decodable.
+                This can lead to slightly worse performance.
+                """
+              ],
+              level: [
+                spec: AV1.level() | :auto,
+                default: :auto,
+                description: """
+                Determines the level of the encoded stream. If not provided, it
+                will be automatically detected from the input stream.
                 """
               ],
               framerate: [
@@ -59,18 +90,20 @@ defmodule Membrane.AV1.Encoder do
                 default: %{},
                 description: """
                 Parameters accepted by SVT-AV1 encoder. For possible values refer to
-                EbSvtAv1EncConfiguration struct located in EbSvtAv1Enc.h.
-                (https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Source/API/EbSvtAv1Enc.h)
+                https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md
+                ("Command line" column, without leading dashes.)
                 """
               ]
 
   @type encoded_frame :: %{payload: binary(), pts: non_neg_integer(), is_keyframe: boolean()}
 
+  @type prediction_structure :: :all_intra | :low_delay | :random_access
+
   @type rate_control ::
           {:cqp | :crf, quantization_parameter :: 0..63}
           | {:cbr | :vbr, target_bitrate :: non_neg_integer()}
 
-  @level_to_config_number %{
+  @level_config_param %{
     auto: 0,
     "2.0": 20,
     "2.1": 21,
@@ -122,9 +155,12 @@ defmodule Membrane.AV1.Encoder do
             # The encoder always assumes :main tier, which is the default, so there's no
             # need to set it explicitly
             # tier: AV1.tier(),
-            level: AV1.level(),
-            rate_control: AV1.Encoder.rate_control(),
             encoder_mode: 0..13,
+            real_time_coding: boolean(),
+            rate_control: AV1.Encoder.rate_control(),
+            prediction_structure: AV1.Encoder.prediction_structure(),
+            enable_forcing_keyframes: boolean(),
+            level: AV1.level(),
             options_framerate: AV1.framerate(),
             config_parameters: %{String.t() => String.t()},
             encoder_ref: reference() | nil,
@@ -134,11 +170,12 @@ defmodule Membrane.AV1.Encoder do
           }
 
     @enforce_keys [
-      # :profile,
-      # :tier,
-      :level,
-      :rate_control,
       :encoder_mode,
+      :real_time_coding,
+      :rate_control,
+      :prediction_structure,
+      :enable_forcing_keyframes,
+      :level,
       :options_framerate,
       :config_parameters,
       :frame_modifiers
@@ -155,9 +192,12 @@ defmodule Membrane.AV1.Encoder do
   def handle_init(_ctx, opts) do
     {[],
      %State{
-       level: opts.level,
        rate_control: opts.rate_control,
        encoder_mode: opts.encoder_mode,
+       real_time_coding: opts.real_time_coding,
+       prediction_structure: opts.prediction_structure,
+       enable_forcing_keyframes: opts.enable_forcing_keyframes,
+       level: opts.level,
        options_framerate: opts.framerate,
        config_parameters: opts.config_parameters,
        frame_modifiers: %FrameModifiers{}
@@ -172,16 +212,15 @@ defmodule Membrane.AV1.Encoder do
 
     level = translate_level(state.level)
 
-    {rate_control_mode, target_bit_rate, qp, aq_mode} = translate_rate_control(state.rate_control)
+    rate_control_params = translate_rate_control(state.rate_control)
 
     internal_config_parameters_list =
       [
-        {"level", Integer.to_string(level)},
-        {"encoder_mode", Integer.to_string(state.encoder_mode)},
-        {"rate_control_mode", Integer.to_string(rate_control_mode)},
-        {"target_bit_rate", Integer.to_string(target_bit_rate)},
-        {"qp", Integer.to_string(qp)},
-        {"aq_mode", Integer.to_string(aq_mode)}
+        {"preset", Integer.to_string(state.encoder_mode)},
+        {"rtc", if(state.real_time_coding, do: "1", else: "0")},
+        {"irefresh-type", if(state.enable_forcing_keyframes, do: "2", else: "1")},
+        {"level", Integer.to_string(level)}
+        | rate_control_params
       ]
       |> Enum.map(fn {key, value} -> %ConfigParameter{key: key, value: value} end)
 
@@ -196,8 +235,7 @@ defmodule Membrane.AV1.Encoder do
         stream_format.height,
         framerate_num,
         framerate_denom,
-        # level,
-        # state.encoder_mode,
+        if(state.real_time_coding, do: :low_delay, else: state.prediction_structure),
         internal_config_parameters_list ++ user_config_parameters_list
       )
 
@@ -238,8 +276,8 @@ defmodule Membrane.AV1.Encoder do
         height: new_input_stream_format.height,
         width: new_input_stream_format.width,
         framerate: new_input_stream_format.framerate,
-        profile: state.profile,
-        tier: state.tier,
+        profile: :main,
+        tier: :main,
         level: state.level
       }
 
@@ -265,12 +303,23 @@ defmodule Membrane.AV1.Encoder do
 
     buffers = get_buffers_from_frames(encoded_frames)
 
-    {[buffer: {:output, buffers}], %State{state | frame_modifiers: %FrameModifiers{}}}
+    {
+      [buffer: {:output, buffers}],
+      %State{state | frame_modifiers: %FrameModifiers{}, force_next_keyframe: false}
+    }
   end
 
   @impl true
   def handle_event(:output, %KeyframeRequestEvent{}, _ctx, %State{} = state) do
-    {[], %State{state | force_next_keyframe: true}}
+    if state.enable_forcing_keyframes do
+      {[], %State{state | force_next_keyframe: true}}
+    else
+      Membrane.Logger.warning(
+        "Forcing keyframes not enabled, see :enable_forcing_keyframes option for details."
+      )
+
+      {[], state}
+    end
   end
 
   @impl true
@@ -292,26 +341,26 @@ defmodule Membrane.AV1.Encoder do
 
   @spec translate_level(Membrane.AV1.level() | :auto) :: non_neg_integer()
   defp translate_level(level) do
-    case Map.get(@level_to_config_number, level) do
+    case Map.get(@level_config_param, level) do
       nil -> raise "Level #{inspect(level)} is not valid"
       level_number -> level_number
     end
   end
 
-  @spec translate_rate_control(rate_control()) :: {
-          # 0=CQP/CRF, 1=VBR, 2=CBR
-          rate_control_mode :: 0..2,
-          target_bit_rate :: non_neg_integer(),
-          qp :: 0..63,
-          # 0=CQP, 2=CRF
-          aq_mode :: 0..2
-        }
+  @spec translate_rate_control(rate_control()) :: [{String.t(), String.t()}]
   defp translate_rate_control(rate_control) do
     case rate_control do
-      {:cqp, quantization_parameter} -> {0, 0, quantization_parameter, 0}
-      {:crf, quantization_parameter} -> {0, 0, quantization_parameter, 2}
-      {:vbr, target_bitrate} -> {1, target_bitrate, 0, 0}
-      {:cbr, target_bitrate} -> {2, target_bitrate, 0, 0}
+      {:cqp, quantization_parameter} ->
+        [{"rc", "0"}, {"aq-mode", "0"}, {"qp", Integer.to_string(quantization_parameter)}]
+
+      {:crf, quantization_parameter} ->
+        [{"rc", "0"}, {"aq-mode", "2"}, {"qp", Integer.to_string(quantization_parameter)}]
+
+      {:vbr, target_bitrate} ->
+        [{"rc", "1"}, {"tbr", Integer.to_string(target_bitrate)}]
+
+      {:cbr, target_bitrate} ->
+        [{"rc", "2"}, {"tbr", Integer.to_string(target_bitrate)}]
     end
   end
 
@@ -333,6 +382,8 @@ defmodule Membrane.AV1.Encoder do
             "Framerate provided both with stream format and options, assuming
             value from stream format: #{inspect(stream_format_framerate)}"
           )
+
+          stream_format_framerate
       end
 
     %RawVideo{stream_format | framerate: resolved_framerate}
