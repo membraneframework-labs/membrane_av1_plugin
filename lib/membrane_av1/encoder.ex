@@ -1,6 +1,6 @@
 defmodule Membrane.AV1.Encoder do
   @moduledoc """
-  AV1 Encoder based on STV-AV1 library. It expects each buffer to contain a single raw frame.
+  AV1 Encoder based on SVT-AV1 library. It expects each buffer to contain a single raw frame.
 
   The encoder supports stream formats changing resolution on the fly when the following contitions
   are met:
@@ -118,7 +118,7 @@ defmodule Membrane.AV1.Encoder do
                 """
               ]
 
-  @level_config_param %{
+  @level_to_config_param %{
     auto: 0,
     "2.0": 20,
     "2.1": 21,
@@ -230,7 +230,6 @@ defmodule Membrane.AV1.Encoder do
     ]
     defstruct @enforce_keys ++
                 [
-                  input_stream_format: nil,
                   encoder_ref: nil,
                   current_stream_format: nil,
                   force_next_keyframe: false
@@ -248,8 +247,7 @@ defmodule Membrane.AV1.Encoder do
        intra_refresh_type: opts.intra_refresh_type,
        level: opts.level,
        options_framerate: opts.framerate,
-       config_parameters: opts.config_parameters,
-       input_stream_format: nil
+       config_parameters: opts.config_parameters
      }}
   end
 
@@ -259,17 +257,22 @@ defmodule Membrane.AV1.Encoder do
       stream_format =
       resolve_framerate(stream_format, state.options_framerate)
 
-    level = translate_level(state.level)
+    level_config_param = translate_level(state.level)
+    rate_control_config_params = translate_rate_control(state.rate_control)
 
-    rate_control_params = translate_rate_control(state.rate_control)
+    intra_refresh_type_config_param =
+      case state.intra_refresh_type do
+        :closed_gop -> "2"
+        :open_gop -> "1"
+      end
 
     internal_config_parameters_list =
       [
         {"preset", Integer.to_string(state.encoder_mode)},
         {"rtc", if(state.real_time_coding, do: "1", else: "0")},
-        {"irefresh-type", if(state.intra_refresh_type, do: "2", else: "1")},
-        {"level", Integer.to_string(level)}
-        | rate_control_params
+        {"irefresh-type", intra_refresh_type_config_param},
+        {"level", Integer.to_string(level_config_param)}
+        | rate_control_config_params
       ]
       |> Enum.map(fn {key, value} -> %ConfigParameter{key: key, value: value} end)
 
@@ -301,7 +304,6 @@ defmodule Membrane.AV1.Encoder do
      %State{state | encoder_ref: encoder_ref, current_stream_format: stream_format}}
   end
 
-  @impl true
   def handle_stream_format(
         :input,
         new_input_stream_format,
@@ -361,20 +363,26 @@ defmodule Membrane.AV1.Encoder do
 
   @impl true
   def handle_event(:output, %KeyframeRequestEvent{}, _ctx, %State{} = state) do
-    if state.intra_refresh_type do
-      {[], %State{state | force_next_keyframe: true}}
-    else
-      Membrane.Logger.warning(
-        "Forcing keyframes not enabled, see :intra_refresh_type option for details."
-      )
+    cond do
+      state.intra_refresh_type == :open_gop ->
+        Membrane.Logger.warning(
+          ":intra_refresh_type option does not allow forcing keyframes when set to `:open_gop`."
+        )
 
-      {[], state}
+        {[], state}
+
+      match?({:vbr, _tbr}, state.rate_control) ->
+        Membrane.Logger.warning(
+          "VBR rate control does not allow forcing keyframes, see `:rate_control` option for details."
+        )
+
+      true ->
+        {[], %State{state | force_next_keyframe: true}}
     end
   end
 
-  @impl true
-  def handle_event(pad, event, _ctx, state) do
-    {[event: {pad, event}], state}
+  def handle_event(pad, event, ctx, state) do
+    super(pad, event, ctx, state)
   end
 
   @impl true
@@ -386,7 +394,7 @@ defmodule Membrane.AV1.Encoder do
 
   @spec translate_level(Membrane.AV1.level() | :auto) :: non_neg_integer()
   defp translate_level(level) do
-    case Map.get(@level_config_param, level) do
+    case Map.get(@level_to_config_param, level) do
       nil -> raise "Level #{inspect(level)} is not valid"
       level_number -> level_number
     end
@@ -428,8 +436,7 @@ defmodule Membrane.AV1.Encoder do
 
         {_stream_format_framerate, options_framerate} ->
           Membrane.Logger.warning(
-            "Framerate provided both with stream format and options, assuming
-            value from options: #{inspect(options_framerate)}"
+            "Framerate provided both with stream format and options, assuming value from options: #{inspect(options_framerate)}"
           )
 
           options_framerate

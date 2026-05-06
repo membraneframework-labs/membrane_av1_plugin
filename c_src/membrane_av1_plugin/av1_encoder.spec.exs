@@ -35,7 +35,7 @@ spec create(
        framerate :: framerate,
        prediction_structure :: prediction_structure,
        config_parameters :: [config_parameter]
-     ) :: {:ok :: label, state} | {:error :: label, reason :: atom}
+     ) :: {:ok :: label, state} | {:error :: label, reason :: string}
 
 spec encode_frame(
        raw_frame :: raw_frame,
@@ -43,10 +43,10 @@ spec encode_frame(
        state
      ) ::
        {:ok :: label, frames :: [encoded_frame]}
-       | {:error :: label, reason :: atom}
+       | {:error :: label, reason :: string}
 
 spec flush(state) ::
        {:ok :: label, frames :: [encoded_frame]}
-       | {:error :: label, reason :: atom}
+       | {:error :: label, reason :: string}
 
 dirty :cpu, [:create, :encode_frame, :flush]

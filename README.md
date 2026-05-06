@@ -4,7 +4,7 @@
 [![API Docs](https://img.shields.io/badge/api-docs-yellow.svg?style=flat)](https://hexdocs.pm/membrane_av1_plugin)
 [![CircleCI](https://circleci.com/gh/membraneframework/membrane_av1_plugin.svg?style=svg)](https://circleci.com/gh/membraneframework/membrane_av1_plugin)
 
-This plugin provides an Membrane.AV1.Encoder element based on AVT-AV1 encoder library.
+This plugin provides an Membrane.AV1.Encoder element based on SVT-AV1 encoder library.
 
 It's a part of the [Membrane Framework](https://membrane.stream).
 

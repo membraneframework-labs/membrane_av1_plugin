@@ -1,9 +1,5 @@
-#include "av1_encoder.h"
-#include "membrane_av1_plugin/_generated/nif/av1_encoder.h"
-#include "svt-av1/EbSvtAv1.h"
-#include "svt-av1/EbSvtAv1Enc.h"
-#include "unifex/unifex.h"
-#include <assert.h>
+#define _POSIX_C_SOURCE 200112L
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -11,7 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define _POSIX_C_SOURCE 200112L
+#include "av1_encoder.h"
+#include "svt-av1/EbSvtAv1.h"
+#include "svt-av1/EbSvtAv1Enc.h"
+#include "unifex/unifex.h"
 
 void handle_destroy_state(UnifexEnv *env, State *state) {
   UNIFEX_UNUSED(env);
@@ -110,7 +109,6 @@ void free_frames(encoded_frame *frames, unsigned int frames_cnt) {
 EbSvtIOFormat get_image_from_payload(raw_frame raw_frame) {
   size_t luma_size = (size_t)raw_frame.width * raw_frame.height;
   size_t chroma_size = (raw_frame.width / 2) * (raw_frame.height / 2);
-  assert(raw_frame.payload->size == luma_size + chroma_size * 2);
 
   EbSvtIOFormat image = {
       .luma = raw_frame.payload->data,
@@ -343,8 +341,6 @@ UNIFEX_TERM get_encoded_frames(UnifexEnv *env, int flushing, UnifexState *state)
 UNIFEX_TERM encode_frame(
     UnifexEnv *env, raw_frame raw_frame, int force_keyframe, UnifexState *state
 ) {
-  EbErrorType error_type;
-
   EbPrivDataNode *priv_data_head = build_priv_data(raw_frame, &force_keyframe, state);
 
   EbSvtIOFormat image = get_image_from_payload(raw_frame);
@@ -359,13 +355,15 @@ UNIFEX_TERM encode_frame(
       .p_app_private = priv_data_head
   };
 
-  if ((error_type = svt_av1_enc_send_picture(state->handle, &in_buffer))) {
+  EbErrorType error_type = svt_av1_enc_send_picture(state->handle, &in_buffer);
+
+  free_priv_data(priv_data_head);
+
+  if (error_type) {
     return result_error(
         env, "Error sending image to the encoder", error_type, encode_frame_result_error, state
     );
   }
-
-  free_priv_data(priv_data_head);
 
   return get_encoded_frames(env, 0, state);
 }
