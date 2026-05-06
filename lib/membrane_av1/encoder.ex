@@ -1,6 +1,16 @@
 defmodule Membrane.AV1.Encoder do
   @moduledoc """
-  AV1 Encoder based on STV-AV1 library.
+  AV1 Encoder based on STV-AV1 library. It expects each buffer to contain a single raw frame.
+
+  The encoder supports stream formats changing resolution on the fly when the following contitions
+  are met:
+  - New resolution is not greater than the previous one.
+  - Low-Delay mode is set (see option `:prediction_structure`).
+  - New luma width and height less than 64.
+  - `:intra_refresh_type` is set to `:closed_gop`.
+
+  Keyframes can be forced with `t:Membrane.KeyframeRequestEvent.t/0` events when
+  `:intra_refresh_type` option is set to `:closed_gop` and `:rate_control` is not VBR.
   """
   use Membrane.Filter
 
@@ -10,10 +20,12 @@ defmodule Membrane.AV1.Encoder do
   alias Membrane.AV1.Encoder.Native
 
   def_input_pad :input,
-    accepted_format: %Membrane.RawVideo{pixel_format: :I420}
+    accepted_format: %Membrane.RawVideo{pixel_format: :I420, aligned: true}
 
   def_output_pad :output,
     accepted_format: AV1
+
+  @fallback_framerate {30, 1}
 
   def_options encoder_mode: [
                 spec: 0..13,
@@ -37,17 +49,16 @@ defmodule Membrane.AV1.Encoder do
                 default: {:crf, 35},
                 description: """
                 Rate control mode used by the encoder:
-                - CQP (Constant Quantization Parameter) - The same quantization parameter
-                  is used for each frame. Higher values mean higher compression.
-                - CRF (Constant Rate Factor) - Quantization parameter (which controls the compression level)
-                is adjusted for each frame to maintain a certain level of perceived quality. Higher
-                values mean higher compression.
+                - CQP (Constant Quantization Parameter) - The same quantization parameter (which controls
+                the compression level) is used for each frame. Higher values mean higher compression.
+                - CRF (Constant Rate Factor) - Quantization parameter is adjusted for each frame to maintain
+                a certain level of perceived quality. Higher values mean higher compression.
                 - CBR (Constant Bit Rate) - Provided bitrate is maintained for each frame
                   for the whole stream. Suitable for live-streaming. `:prediction_structure` option
-                MUST be set to :low_delay.
+                  MUST be set to :low_delay.
                 - VBR (Variable Bit Rate) - The encoder will aim to produce a stream with the
                   average bitrate of the provided value, varying the size of the output depending on
-                  the complexity of the input.
+                  the complexity of the input. This mode prohibits forcing keyframes.
                 """
               ],
               prediction_structure: [
@@ -57,17 +68,26 @@ defmodule Membrane.AV1.Encoder do
                 Prediction structure used when encoding the stream:
                 - `:all_intra` - Every frame is an intra frame.
                 - `:low_delay` - Frames can only reference previous frames. Additionally no frames
-                  are buffered, each input frame will result in an encoded output frame.
+                  are buffered, each input frame will result in an encoded output frame. Forced for
+                  real time coding.
                 - `:random_access` - B-frames are allowed.
                 """
               ],
-              enable_forcing_keyframes: [
-                spec: boolean(),
-                default: true,
+              intra_refresh_type: [
+                spec: intra_refresh_type(),
+                default: :closed_gop,
                 description: """
-                To enable the encoder to force keyframes, intra refresh points have to be true
-                keyframes, not just intra-only frames, in order to make them independently decodable.
-                This can lead to slightly worse performance.
+                Determines what type of intra-frame is inserted at the boundaries of GOPs:
+                - `:closed_gop` - the encoder produces a keyframe (IDR), which is fully
+                  independent and a decoder can start decoding from this point in the stream.
+                - `:open_gop` - the encoder produces an intra-only frame (CRA), which can reference
+                  previous frames, and therefore is not fully independent, but has lower overhead.
+
+                To allow the encoder to force keyframes, this option has to be set to `:closed_gop`,
+                because intra refresh points have to be true keyframes, not just intra-only frames,
+                in order to be independently decodable. This can lead to slightly worse performance.
+                Forcing keyframes is not allowed when `:rate_control` option is in VBR mode, even if this option is
+                set to `:closed_gop`.
                 """
               ],
               level: [
@@ -82,26 +102,21 @@ defmodule Membrane.AV1.Encoder do
                 spec: AV1.framerate() | nil,
                 default: nil,
                 description: """
-                Used by the encoder if not present in stream format. Framerate MUST be provided in one of these two places.
+                Used by the encoder for computations regarding bitrate and intra periods. If not
+                provided here, value from stream format is assumed. If not present there too, a default
+                fallback value of #{inspect(@fallback_framerate)} is assumed.
                 """
               ],
               config_parameters: [
                 spec: %{String.t() => String.t()},
                 default: %{},
                 description: """
-                Parameters accepted by SVT-AV1 encoder. For possible values refer to
+                Parameters accepted by SVT-AV1 encoder. They override parameters set by other
+                options. For possible values refer to
                 https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md
-                ("Command line" column, without leading dashes.)
+                ("Command line" column, without leading dashes).
                 """
               ]
-
-  @type encoded_frame :: %{payload: binary(), pts: non_neg_integer(), is_keyframe: boolean()}
-
-  @type prediction_structure :: :all_intra | :low_delay | :random_access
-
-  @type rate_control ::
-          {:cqp | :crf, quantization_parameter :: 0..63}
-          | {:cbr | :vbr, target_bitrate :: non_neg_integer()}
 
   @level_config_param %{
     auto: 0,
@@ -121,20 +136,55 @@ defmodule Membrane.AV1.Encoder do
     "6.3": 63
   }
 
-  defmodule FrameModifiers do
+  @type prediction_structure :: :all_intra | :low_delay | :random_access
+
+  @type rate_control ::
+          {:cqp | :crf, quantization_parameter :: 0..63}
+          | {:cbr | :vbr, target_bitrate :: non_neg_integer()}
+
+  @type intra_refresh_type :: :closed_gop | :open_gop
+
+  defmodule Framerate do
     @moduledoc false
 
     @type t :: %__MODULE__{
-            change_height: integer(),
-            change_width: integer(),
-            change_framerate_numerator: integer(),
-            change_framerate_denominator: integer()
+            numerator: non_neg_integer(),
+            denominator: pos_integer()
           }
 
-    defstruct change_height: -1,
-              change_width: -1,
-              change_framerate_numerator: -1,
-              change_framerate_denominator: -1
+    @enforce_keys [:numerator, :denominator]
+
+    defstruct @enforce_keys
+  end
+
+  defmodule EncodedFrame do
+    @moduledoc false
+
+    @type t :: %__MODULE__{
+            payload: binary(),
+            pts: integer(),
+            dts: integer(),
+            is_keyframe: boolean()
+          }
+    @enforce_keys [:payload, :pts, :dts, :is_keyframe]
+
+    defstruct @enforce_keys
+  end
+
+  defmodule RawFrame do
+    @moduledoc false
+    alias Membrane.AV1.Encoder.Framerate
+
+    @type t :: %__MODULE__{
+            payload: binary(),
+            pts: integer(),
+            width: non_neg_integer(),
+            height: non_neg_integer(),
+            framerate: Framerate.t()
+          }
+    @enforce_keys [:payload, :pts, :width, :height, :framerate]
+
+    defstruct @enforce_keys
   end
 
   defmodule ConfigParameter do
@@ -159,13 +209,12 @@ defmodule Membrane.AV1.Encoder do
             real_time_coding: boolean(),
             rate_control: AV1.Encoder.rate_control(),
             prediction_structure: AV1.Encoder.prediction_structure(),
-            enable_forcing_keyframes: boolean(),
+            intra_refresh_type: AV1.Encoder.intra_refresh_type(),
             level: AV1.level(),
             options_framerate: AV1.framerate(),
             config_parameters: %{String.t() => String.t()},
             encoder_ref: reference() | nil,
-            previous_input_stream_format: RawVideo.t() | nil,
-            frame_modifiers: FrameModifiers.t(),
+            current_stream_format: RawVideo.t() | nil,
             force_next_keyframe: boolean()
           }
 
@@ -174,16 +223,16 @@ defmodule Membrane.AV1.Encoder do
       :real_time_coding,
       :rate_control,
       :prediction_structure,
-      :enable_forcing_keyframes,
+      :intra_refresh_type,
       :level,
       :options_framerate,
-      :config_parameters,
-      :frame_modifiers
+      :config_parameters
     ]
     defstruct @enforce_keys ++
                 [
+                  input_stream_format: nil,
                   encoder_ref: nil,
-                  previous_input_stream_format: nil,
+                  current_stream_format: nil,
                   force_next_keyframe: false
                 ]
   end
@@ -196,11 +245,11 @@ defmodule Membrane.AV1.Encoder do
        encoder_mode: opts.encoder_mode,
        real_time_coding: opts.real_time_coding,
        prediction_structure: opts.prediction_structure,
-       enable_forcing_keyframes: opts.enable_forcing_keyframes,
+       intra_refresh_type: opts.intra_refresh_type,
        level: opts.level,
        options_framerate: opts.framerate,
        config_parameters: opts.config_parameters,
-       frame_modifiers: %FrameModifiers{}
+       input_stream_format: nil
      }}
   end
 
@@ -218,7 +267,7 @@ defmodule Membrane.AV1.Encoder do
       [
         {"preset", Integer.to_string(state.encoder_mode)},
         {"rtc", if(state.real_time_coding, do: "1", else: "0")},
-        {"irefresh-type", if(state.enable_forcing_keyframes, do: "2", else: "1")},
+        {"irefresh-type", if(state.intra_refresh_type, do: "2", else: "1")},
         {"level", Integer.to_string(level)}
         | rate_control_params
       ]
@@ -233,8 +282,7 @@ defmodule Membrane.AV1.Encoder do
       Native.create(
         stream_format.width,
         stream_format.height,
-        framerate_num,
-        framerate_denom,
+        %Framerate{numerator: framerate_num, denominator: framerate_denom},
         if(state.real_time_coding, do: :low_delay, else: state.prediction_structure),
         internal_config_parameters_list ++ user_config_parameters_list
       )
@@ -249,7 +297,8 @@ defmodule Membrane.AV1.Encoder do
         level: state.level
       }
 
-    {[stream_format: {:output, output_stream_format}], %State{state | encoder_ref: encoder_ref}}
+    {[stream_format: {:output, output_stream_format}],
+     %State{state | encoder_ref: encoder_ref, current_stream_format: stream_format}}
   end
 
   @impl true
@@ -265,13 +314,6 @@ defmodule Membrane.AV1.Encoder do
       resolve_framerate(ctx.pad_data[:input].stream_format, state.options_framerate)
 
     if old_input_stream_format != new_input_stream_format do
-      frame_modifiers =
-        update_frame_modifiers(
-          state.frame_modifiers,
-          old_input_stream_format,
-          new_input_stream_format
-        )
-
       output_stream_format = %Membrane.AV1{
         height: new_input_stream_format.height,
         width: new_input_stream_format.width,
@@ -283,7 +325,7 @@ defmodule Membrane.AV1.Encoder do
 
       {
         [stream_format: {:output, output_stream_format}],
-        %State{state | frame_modifiers: frame_modifiers}
+        %State{state | current_stream_format: new_input_stream_format}
       }
     else
       {[], state}
@@ -292,12 +334,20 @@ defmodule Membrane.AV1.Encoder do
 
   @impl true
   def handle_buffer(:input, buffer, _ctx, %State{} = state) do
+    {framerate_num, framerate_denom} = state.current_stream_format.framerate
+
+    raw_frame = %RawFrame{
+      payload: buffer.payload,
+      pts: buffer.pts,
+      width: state.current_stream_format.width,
+      height: state.current_stream_format.height,
+      framerate: %Framerate{numerator: framerate_num, denominator: framerate_denom}
+    }
+
     {:ok, encoded_frames} =
       Native.encode_frame(
-        buffer.payload,
-        buffer.pts,
+        raw_frame,
         state.force_next_keyframe,
-        state.frame_modifiers,
         state.encoder_ref
       )
 
@@ -305,17 +355,17 @@ defmodule Membrane.AV1.Encoder do
 
     {
       [buffer: {:output, buffers}],
-      %State{state | frame_modifiers: %FrameModifiers{}, force_next_keyframe: false}
+      %State{state | force_next_keyframe: false}
     }
   end
 
   @impl true
   def handle_event(:output, %KeyframeRequestEvent{}, _ctx, %State{} = state) do
-    if state.enable_forcing_keyframes do
+    if state.intra_refresh_type do
       {[], %State{state | force_next_keyframe: true}}
     else
       Membrane.Logger.warning(
-        "Forcing keyframes not enabled, see :enable_forcing_keyframes option for details."
+        "Forcing keyframes not enabled, see :intra_refresh_type option for details."
       )
 
       {[], state}
@@ -323,13 +373,8 @@ defmodule Membrane.AV1.Encoder do
   end
 
   @impl true
-  def handle_event(:output, event, _ctx, state) do
-    {[event: {:input, event}], state}
-  end
-
-  @impl true
-  def handle_event(:input, event, _ctx, state) do
-    {[event: {:output, event}], state}
+  def handle_event(pad, event, _ctx, state) do
+    {[event: {pad, event}], state}
   end
 
   @impl true
@@ -369,7 +414,11 @@ defmodule Membrane.AV1.Encoder do
     resolved_framerate =
       case {stream_format.framerate, options_framerate} do
         {nil, nil} ->
-          raise "Framerate needs to be provided either with stream format or options"
+          Membrane.Logger.warning(
+            "Framerate provided neither with stream format or options, using fallback value #{inspect(@fallback_framerate)}"
+          )
+
+          @fallback_framerate
 
         {nil, options_framerate} ->
           options_framerate
@@ -377,56 +426,26 @@ defmodule Membrane.AV1.Encoder do
         {stream_format_framerate, nil} ->
           stream_format_framerate
 
-        {stream_format_framerate, _options_framerate} ->
+        {_stream_format_framerate, options_framerate} ->
           Membrane.Logger.warning(
             "Framerate provided both with stream format and options, assuming
-            value from stream format: #{inspect(stream_format_framerate)}"
+            value from options: #{inspect(options_framerate)}"
           )
 
-          stream_format_framerate
+          options_framerate
       end
 
     %RawVideo{stream_format | framerate: resolved_framerate}
   end
 
-  @spec update_frame_modifiers(FrameModifiers.t(), RawVideo.t(), RawVideo.t()) ::
-          FrameModifiers.t()
-  defp update_frame_modifiers(
-         %FrameModifiers{} = frame_modifiers,
-         old_stream_format,
-         new_stream_format
-       ) do
-    %RawVideo{
-      width: old_width,
-      height: old_height,
-      framerate: {old_framerate_num, old_framerate_denom}
-    } = old_stream_format
-
-    %RawVideo{
-      width: new_width,
-      height: new_height,
-      framerate: {new_framerate_num, new_framerate_denom}
-    } = new_stream_format
-
-    %FrameModifiers{
-      frame_modifiers
-      | change_width: if(old_width != new_width, do: new_width, else: -1),
-        change_height: if(old_height != new_height, do: new_height, else: -1),
-        change_framerate_numerator:
-          if(old_framerate_num != new_framerate_num, do: new_framerate_num, else: -1),
-        change_framerate_denominator:
-          if(old_framerate_denom != new_framerate_denom, do: new_framerate_denom, else: -1)
-    }
-  end
-
-  @spec get_buffers_from_frames([encoded_frame()]) :: [Buffer.t()]
+  @spec get_buffers_from_frames([EncodedFrame.t()]) :: [Buffer.t()]
   defp get_buffers_from_frames(encoded_frames) do
-    Enum.map(encoded_frames, fn %{payload: payload, pts: pts, dts: dts, is_keyframe: is_keyframe} ->
+    Enum.map(encoded_frames, fn frame ->
       %Buffer{
-        payload: payload,
-        pts: Membrane.Time.nanoseconds(pts),
-        dts: Membrane.Time.nanoseconds(dts),
-        metadata: %{av1: %{is_keyframe: is_keyframe}}
+        payload: frame.payload,
+        pts: Membrane.Time.nanoseconds(frame.pts),
+        dts: Membrane.Time.nanoseconds(frame.dts),
+        metadata: %{av1: %{is_keyframe: frame.is_keyframe}}
       }
     end)
   end

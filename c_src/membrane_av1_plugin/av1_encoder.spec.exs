@@ -4,6 +4,11 @@ state_type "State"
 
 type prediction_structure :: :all_intra | :low_delay | :random_access
 
+type framerate :: %Framerate{
+       numerator: unsigned,
+       denominator: unsigned
+     }
+
 type encoded_frame :: %EncodedFrame{
        payload: payload,
        pts: int64,
@@ -11,11 +16,12 @@ type encoded_frame :: %EncodedFrame{
        is_keyframe: bool
      }
 
-type frame_modifiers :: %FrameModifiers{
-       change_height: int64,
-       change_width: int64,
-       change_framerate_numerator: int64,
-       change_framerate_denominator: int64
+type raw_frame :: %RawFrame{
+       payload: payload,
+       pts: int64,
+       width: unsigned,
+       height: unsigned,
+       framerate: framerate
      }
 
 type config_parameter :: %Membrane.AV1.Encoder.ConfigParameter{
@@ -26,17 +32,14 @@ type config_parameter :: %Membrane.AV1.Encoder.ConfigParameter{
 spec create(
        width :: unsigned,
        height :: unsigned,
-       framerate_numerator :: unsigned,
-       framerate_denominator :: unsigned,
+       framerate :: framerate,
        prediction_structure :: prediction_structure,
        config_parameters :: [config_parameter]
      ) :: {:ok :: label, state} | {:error :: label, reason :: atom}
 
 spec encode_frame(
-       payload,
-       pts :: int64,
+       raw_frame :: raw_frame,
        force_keyframe :: bool,
-       frame_modifiers :: frame_modifiers,
        state
      ) ::
        {:ok :: label, frames :: [encoded_frame]}

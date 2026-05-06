@@ -1,5 +1,5 @@
-#include "membrane_av1_plugin/_generated/nif/av1_encoder.h"
 #include "av1_encoder.h"
+#include "membrane_av1_plugin/_generated/nif/av1_encoder.h"
 #include "svt-av1/EbSvtAv1.h"
 #include "svt-av1/EbSvtAv1Enc.h"
 #include "unifex/unifex.h"
@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define _POSIX_C_SOURCE 200112L
 
 void handle_destroy_state(UnifexEnv *env, State *state) {
   UNIFEX_UNUSED(env);
@@ -105,21 +107,18 @@ void free_frames(encoded_frame *frames, unsigned int frames_cnt) {
   unifex_free(frames);
 }
 
-EbSvtIOFormat get_image_from_payload(UnifexPayload *payload, State *state) {
-  uint32_t width = state->width;
-  uint32_t height = state->height;
-
-  size_t luma_size = (size_t)width * height;
-  size_t chroma_size = (width / 2) * (height / 2);
-  assert(payload->size == luma_size + chroma_size * 2);
+EbSvtIOFormat get_image_from_payload(raw_frame raw_frame) {
+  size_t luma_size = (size_t)raw_frame.width * raw_frame.height;
+  size_t chroma_size = (raw_frame.width / 2) * (raw_frame.height / 2);
+  assert(raw_frame.payload->size == luma_size + chroma_size * 2);
 
   EbSvtIOFormat image = {
-      .luma = payload->data,
-      .cb = payload->data + luma_size,
-      .cr = payload->data + luma_size + chroma_size,
-      .y_stride = width,
-      .cb_stride = width / 2,
-      .cr_stride = width / 2,
+      .luma = raw_frame.payload->data,
+      .cb = raw_frame.payload->data + luma_size,
+      .cr = raw_frame.payload->data + luma_size + chroma_size,
+      .y_stride = raw_frame.width,
+      .cb_stride = raw_frame.width / 2,
+      .cr_stride = raw_frame.width / 2,
   };
   return image;
 }
@@ -128,8 +127,7 @@ UNIFEX_TERM create(
     UnifexEnv *env,
     unsigned int width,
     unsigned int height,
-    unsigned int framerate_numerator,
-    unsigned int framerate_denominator,
+    framerate framerate,
     PredictionStructure prediction_structure,
     config_parameter *config_parameters,
     unsigned int config_parameters_length
@@ -149,14 +147,14 @@ UNIFEX_TERM create(
 
   state->width = width;
   state->height = height;
-  state->framerate_numerator = framerate_numerator;
-  state->framerate_denominator = framerate_denominator;
+  state->framerate.numerator = framerate.numerator;
+  state->framerate.denominator = framerate.denominator;
   state->pred_structure = (PredStructure)prediction_structure;
 
   config.source_width = width;
   config.source_height = height;
-  config.frame_rate_numerator = framerate_numerator;
-  config.frame_rate_denominator = framerate_denominator;
+  config.frame_rate_numerator = framerate.numerator;
+  config.frame_rate_denominator = framerate.denominator;
   config.pred_structure = (PredStructure)prediction_structure;
 
   for (unsigned int i = 0; i < config_parameters_length; i++) {
@@ -184,16 +182,6 @@ UNIFEX_TERM create(
   }
 
   return create_result_ok(env, state);
-}
-
-void apply_frame_modifiers(frame_modifiers frame_modifiers, State *state) {
-  if (frame_modifiers.change_width != -1) state->width = (unsigned int)frame_modifiers.change_width;
-  if (frame_modifiers.change_height != -1)
-    state->height = (unsigned int)frame_modifiers.change_height;
-  if (frame_modifiers.change_framerate_numerator != -1)
-    state->framerate_numerator = (unsigned int)frame_modifiers.change_framerate_numerator;
-  if (frame_modifiers.change_framerate_denominator != -1)
-    state->framerate_denominator = (unsigned int)frame_modifiers.change_framerate_denominator;
 }
 
 void append_priv_data_node(
@@ -225,13 +213,13 @@ void free_priv_data(EbPrivDataNode *priv_data_head) {
   }
 }
 
-EbPrivDataNode *build_priv_data(
-    frame_modifiers frame_modifiers, int *force_keyframe, UnifexState *state
-) {
+EbPrivDataNode *build_priv_data(raw_frame raw_frame, int *force_keyframe, UnifexState *state) {
   EbPrivDataNode *priv_data_head = NULL;
   EbPrivDataNode *priv_data_tail = NULL;
 
-  if (frame_modifiers.change_height != -1 || frame_modifiers.change_width != -1) {
+  if (raw_frame.height != state->height || raw_frame.width != state->width) {
+    state->height = raw_frame.height;
+    state->width = raw_frame.width;
 
     SvtAv1InputPicDef *resolution_change = malloc(sizeof(SvtAv1InputPicDef));
     *resolution_change = (SvtAv1InputPicDef){
@@ -252,12 +240,15 @@ EbPrivDataNode *build_priv_data(
     );
   }
 
-  if (frame_modifiers.change_framerate_numerator != -1 ||
-      frame_modifiers.change_framerate_denominator != -1) {
+  if (raw_frame.framerate.numerator != state->framerate.numerator ||
+      raw_frame.framerate.denominator != state->framerate.denominator) {
+    state->framerate.numerator = raw_frame.framerate.numerator;
+    state->framerate.denominator = raw_frame.framerate.denominator;
+
     SvtAv1FrameRateInfo *framerate_change = malloc(sizeof(SvtAv1FrameRateInfo));
     *framerate_change = (SvtAv1FrameRateInfo){
-        .frame_rate_numerator = state->framerate_numerator,
-        .frame_rate_denominator = state->framerate_denominator,
+        .frame_rate_numerator = state->framerate.numerator,
+        .frame_rate_denominator = state->framerate.denominator,
     };
 
     append_priv_data_node(
@@ -328,19 +319,21 @@ UNIFEX_TERM get_encoded_frames(UnifexEnv *env, int flushing, UnifexState *state)
 
   } while (continue_draining);
 
-  UNIFEX_TERM (*error_fun)(UnifexEnv *, const char *) =
-      flushing ? flush_result_error : encode_frame_result_error;
-
-  UNIFEX_TERM (*success_fun)(UnifexEnv *, encoded_frame const *, unsigned int) =
-      flushing ? flush_result_ok : encode_frame_result_ok;
-
   UNIFEX_TERM result;
 
   if (error_type == EB_NoErrorEmptyQueue || error_type == EB_ErrorNone) {
-    result = success_fun(env, encoded_frames, frames_cnt);
+    if (flushing) result = flush_result_ok(env, encoded_frames, frames_cnt);
+    else result = encode_frame_result_ok(env, encoded_frames, frames_cnt);
+
   } else {
     svt_av1_enc_release_out_buffer(&out_buffer);
-    result = result_error(env, "Error retrieving encoded frame", error_type, error_fun, state);
+    result = result_error(
+        env,
+        "Error retrieving encoded frame",
+        error_type,
+        flushing ? flush_result_error : encode_frame_result_error,
+        state
+    );
   }
 
   free_frames(encoded_frames, frames_cnt);
@@ -348,26 +341,19 @@ UNIFEX_TERM get_encoded_frames(UnifexEnv *env, int flushing, UnifexState *state)
 }
 
 UNIFEX_TERM encode_frame(
-    UnifexEnv *env,
-    UnifexPayload *payload,
-    int64_t pts,
-    int force_keyframe,
-    frame_modifiers frame_modifiers,
-    UnifexState *state
+    UnifexEnv *env, raw_frame raw_frame, int force_keyframe, UnifexState *state
 ) {
   EbErrorType error_type;
 
-  apply_frame_modifiers(frame_modifiers, state);
+  EbPrivDataNode *priv_data_head = build_priv_data(raw_frame, &force_keyframe, state);
 
-  EbPrivDataNode *priv_data_head = build_priv_data(frame_modifiers, &force_keyframe, state);
-
-  EbSvtIOFormat image = get_image_from_payload(payload, state);
+  EbSvtIOFormat image = get_image_from_payload(raw_frame);
 
   EbBufferHeaderType in_buffer = {
       .size = sizeof(EbBufferHeaderType),
       .p_buffer = (uint8_t *)&image,
-      .n_filled_len = payload->size,
-      .pts = pts,
+      .n_filled_len = raw_frame.payload->size,
+      .pts = raw_frame.pts,
       .pic_type = force_keyframe ? EB_AV1_KEY_PICTURE : EB_AV1_INVALID_PICTURE,
       .flags = 0,
       .p_app_private = priv_data_head
