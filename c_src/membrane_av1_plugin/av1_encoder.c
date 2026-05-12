@@ -106,7 +106,8 @@ void free_frames(encoded_frame *frames, unsigned int frames_cnt) {
   unifex_free(frames);
 }
 
-EbSvtIOFormat get_image_from_payload(raw_frame raw_frame) {
+EbSvtIOFormat get_image_from_raw_frame(raw_frame raw_frame) {
+  // only YUV420 subsampling is supported
   size_t luma_size = (size_t)raw_frame.width * raw_frame.height;
   size_t chroma_size = (raw_frame.width / 2) * (raw_frame.height / 2);
 
@@ -343,7 +344,7 @@ UNIFEX_TERM encode_frame(
 ) {
   EbPrivDataNode *priv_data_head = build_priv_data(raw_frame, &force_keyframe, state);
 
-  EbSvtIOFormat image = get_image_from_payload(raw_frame);
+  EbSvtIOFormat image = get_image_from_raw_frame(raw_frame);
 
   EbBufferHeaderType in_buffer = {
       .size = sizeof(EbBufferHeaderType),

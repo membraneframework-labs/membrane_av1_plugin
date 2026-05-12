@@ -2,11 +2,11 @@ defmodule Membrane.AV1.Encoder do
   @moduledoc """
   AV1 Encoder based on SVT-AV1 library. It expects each buffer to contain a single raw frame.
 
-  The encoder supports stream formats changing resolution on the fly when the following contitions
+  The encoder supports stream formats changing resolution on the fly when the following conditions
   are met:
   - New resolution is not greater than the previous one.
   - Low-Delay mode is set (see option `:prediction_structure`).
-  - New luma width and height less than 64.
+  - New luma width and height are not smaller than 64.
   - `:intra_refresh_type` is set to `:closed_gop`.
 
   Keyframes can be forced with `t:Membrane.KeyframeRequestEvent.t/0` events when
@@ -77,17 +77,20 @@ defmodule Membrane.AV1.Encoder do
                 spec: intra_refresh_type(),
                 default: :closed_gop,
                 description: """
-                Determines what type of intra-frame is inserted at the boundaries of GOPs:
-                - `:closed_gop` - the encoder produces a keyframe (IDR), which is fully
-                  independent and a decoder can start decoding from this point in the stream.
-                - `:open_gop` - the encoder produces an intra-only frame (CRA), which can reference
-                  previous frames, and therefore is not fully independent, but has lower overhead.
+                Determines whether the encoder produces open or closed GOPs and what type of
+                intra-frame is inserted at their boundaries:
+                - `:closed_gop` - the encoder produces IDR (Instantaneous Decoder Refresh) frames.
+                  Frames belonging to its GOP can only reference frames also belonging to the same
+                  GOP. An IDR also fully resets the decoder state, which allows a decoder to start
+                  decoding up from this point.
+                - `:open_gop` - the encoder produces CRA (Clean Random Access) frames. Frames
+                  belonging to its GOP can reference frames from other GOPs, which can lead to better
+                  compression.
 
                 To allow the encoder to force keyframes, this option has to be set to `:closed_gop`,
-                because intra refresh points have to be true keyframes, not just intra-only frames,
-                in order to be independently decodable. This can lead to slightly worse performance.
-                Forcing keyframes is not allowed when `:rate_control` option is in VBR mode, even if this option is
-                set to `:closed_gop`.
+                so that it's guaranteed that the stream is fully decodable up from this point.
+                Forcing keyframes is not allowed when `:rate_control` option is in VBR mode,
+                even if this option is set to `:closed_gop`.
                 """
               ],
               level: [
@@ -98,7 +101,7 @@ defmodule Membrane.AV1.Encoder do
                 will be automatically detected from the input stream.
                 """
               ],
-              framerate: [
+              approx_framerate: [
                 spec: AV1.framerate() | nil,
                 default: nil,
                 description: """
@@ -211,7 +214,7 @@ defmodule Membrane.AV1.Encoder do
             prediction_structure: AV1.Encoder.prediction_structure(),
             intra_refresh_type: AV1.Encoder.intra_refresh_type(),
             level: AV1.level(),
-            options_framerate: AV1.framerate(),
+            approx_framerate: AV1.framerate(),
             config_parameters: %{String.t() => String.t()},
             encoder_ref: reference() | nil,
             current_stream_format: RawVideo.t() | nil,
@@ -225,7 +228,7 @@ defmodule Membrane.AV1.Encoder do
       :prediction_structure,
       :intra_refresh_type,
       :level,
-      :options_framerate,
+      :approx_framerate,
       :config_parameters
     ]
     defstruct @enforce_keys ++
@@ -246,7 +249,7 @@ defmodule Membrane.AV1.Encoder do
        prediction_structure: opts.prediction_structure,
        intra_refresh_type: opts.intra_refresh_type,
        level: opts.level,
-       options_framerate: opts.framerate,
+       approx_framerate: opts.approx_framerate,
        config_parameters: opts.config_parameters
      }}
   end
@@ -255,7 +258,7 @@ defmodule Membrane.AV1.Encoder do
   def handle_stream_format(:input, stream_format, _ctx, %State{encoder_ref: nil} = state) do
     %RawVideo{framerate: {framerate_num, framerate_denom}} =
       stream_format =
-      resolve_framerate(stream_format, state.options_framerate)
+      resolve_framerate(stream_format, state.approx_framerate)
 
     level_config_param = translate_level(state.level)
     rate_control_config_params = translate_rate_control(state.rate_control)
@@ -310,10 +313,10 @@ defmodule Membrane.AV1.Encoder do
         ctx,
         %State{encoder_ref: _initialized_encoder} = state
       ) do
-    new_input_stream_format = resolve_framerate(new_input_stream_format, state.options_framerate)
+    new_input_stream_format = resolve_framerate(new_input_stream_format, state.approx_framerate)
 
     old_input_stream_format =
-      resolve_framerate(ctx.pad_data[:input].stream_format, state.options_framerate)
+      resolve_framerate(ctx.pad_data[:input].stream_format, state.approx_framerate)
 
     if old_input_stream_format != new_input_stream_format do
       output_stream_format = %Membrane.AV1{
@@ -418,9 +421,9 @@ defmodule Membrane.AV1.Encoder do
   end
 
   @spec resolve_framerate(RawVideo.t(), AV1.framerate()) :: RawVideo.t()
-  defp resolve_framerate(%RawVideo{} = stream_format, options_framerate) do
+  defp resolve_framerate(%RawVideo{} = stream_format, approx_framerate) do
     resolved_framerate =
-      case {stream_format.framerate, options_framerate} do
+      case {stream_format.framerate, approx_framerate} do
         {nil, nil} ->
           Membrane.Logger.warning(
             "Framerate provided neither with stream format or options, using fallback value #{inspect(@fallback_framerate)}"
@@ -428,18 +431,18 @@ defmodule Membrane.AV1.Encoder do
 
           @fallback_framerate
 
-        {nil, options_framerate} ->
-          options_framerate
+        {nil, approx_framerate} ->
+          approx_framerate
 
         {stream_format_framerate, nil} ->
           stream_format_framerate
 
-        {_stream_format_framerate, options_framerate} ->
+        {_stream_format_framerate, approx_framerate} ->
           Membrane.Logger.warning(
-            "Framerate provided both with stream format and options, assuming value from options: #{inspect(options_framerate)}"
+            "Framerate provided both with stream format and options, assuming value from options: #{inspect(approx_framerate)}"
           )
 
-          options_framerate
+          approx_framerate
       end
 
     %RawVideo{stream_format | framerate: resolved_framerate}

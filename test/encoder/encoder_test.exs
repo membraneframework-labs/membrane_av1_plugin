@@ -34,9 +34,7 @@ defmodule Membrane.AV1.EncoderTest do
             framerate: {30, 1}
           })
           |> child(:encoder, encoder_struct)
-          |> child(:serializer, %Membrane.IVF.Serializer{
-            timebase: {1, 30}
-          })
+          |> child(:serializer, Membrane.IVF.Serializer)
           |> child(:sink, %Membrane.File.Sink{location: output_path})
       )
 
