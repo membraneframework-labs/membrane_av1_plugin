@@ -32,6 +32,7 @@ defmodule Membrane.AV1.Encoder do
                 default: 8,
                 description: """
                 Encoder preset. Higher values increase encoding speed and decrease quality.
+                For more details see https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/CommonQuestions.md#what-presets-do
                 """
               ],
               real_time_coding: [
