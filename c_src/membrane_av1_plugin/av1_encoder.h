@@ -8,10 +8,7 @@ typedef struct State {
   EbComponentType *handle;
   unsigned int height;
   unsigned int width;
-  struct {
-    unsigned int numerator;
-    unsigned int denominator;
-  } framerate; // Unifex doesn't allow generated types in State.
+  framerate framerate;
   PredStructure pred_structure;
 } State;
 
