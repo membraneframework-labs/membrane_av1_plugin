@@ -23,7 +23,7 @@ defmodule Membrane.AV1.BundlexProject do
         ],
         preprocessor: Unifex
       ],
-      av1_encoder: [
+      av1_decoder: [
         interface: :nif,
         sources: ["av1_decoder.c"],
         os_deps: [
