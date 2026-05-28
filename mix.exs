@@ -40,7 +40,8 @@ defmodule Membrane.AV1.Plugin.Mixfile do
   defp deps do
     [
       {:membrane_core, "~> 1.0"},
-      {:unifex, "~> 1.2"},
+      {:unifex, github: "membraneframework/unifex", branch: "unifex-types-in-state"},
+      # {:unifex, "~> 1.2"},
       {:membrane_precompiled_dependency_provider, "~> 0.2.2"},
       {:membrane_av1_format, "~> 0.2.0"},
       {:membrane_ivf_plugin, "~> 0.9.0"},
