@@ -21,7 +21,7 @@ defmodule Membrane.AV1.DecoderTest do
     input_path = Path.join(@fixtures_dir, input_file)
 
     ref_path = Path.join(@fixtures_dir, ref_file)
-    output_path = Path.join(tmp_dir, "output.ivf")
+    output_path = Path.join(tmp_dir, "output.raw")
 
     pid =
       Testing.Pipeline.start_link_supervised!(

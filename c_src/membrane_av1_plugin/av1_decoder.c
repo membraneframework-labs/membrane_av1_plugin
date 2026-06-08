@@ -1,15 +1,49 @@
 #include "av1_decoder.h"
 #include "dav1d/common.h"
+#include "dav1d/data.h"
 #include "dav1d/dav1d.h"
 #include "dav1d/headers.h"
 #include "dav1d/picture.h"
 #include "membrane_av1_plugin/_generated/nif/av1_decoder.h"
+#include "membrane_av1_plugin/_generated/nif/av1_decoder_types.h"
 #include "unifex/payload.h"
 #include "unifex/unifex.h"
+
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <string.h>
+
+typedef struct frames_vector {
+  raw_frame *data;
+  unsigned int length;
+  unsigned int allocated;
+} raw_frame_vector;
+
+raw_frame_vector vector_init() {
+  return (raw_frame_vector){
+      .length = 0, .allocated = 4, .data = unifex_alloc(4 * sizeof(raw_frame))
+  };
+}
+
+void vector_append(raw_frame_vector *vec, raw_frame frame) {
+  if (vec->length >= vec->allocated) {
+    vec->allocated *= 2;
+    vec->data = unifex_realloc(vec->data, vec->allocated * sizeof(raw_frame));
+  }
+  vec->data[vec->length] = frame;
+  vec->length++;
+}
+
+void vector_free(raw_frame_vector *vec) {
+  for (unsigned int i = 0; i < vec->length; i++) {
+    UnifexPayload *payload = vec->data[i].payload;
+    if (payload != NULL) {
+      unifex_payload_release(payload);
+      unifex_free(payload);
+    }
+  }
+  unifex_free(vec->data);
+}
 
 void handle_destroy_state(UnifexEnv *env, State *state) {
   UNIFEX_UNUSED(env);
@@ -76,7 +110,7 @@ void get_payload_from_picture(UnifexEnv *env, Dav1dPicture picture, UnifexPayloa
 
   unifex_payload_alloc(env, UNIFEX_PAYLOAD_BINARY, picture_size, payload);
 
-  void *picture_data = picture.data[0];
+  unsigned char *picture_data = picture.data[0];
   unsigned char *frame_data = payload->data;
 
   for (int y = 0; y < picture.p.h; y++) {
@@ -144,51 +178,65 @@ int get_decoded_frame(UnifexEnv *env, raw_frame *output_frame, UnifexState *stat
   return result;
 }
 
-UNIFEX_TERM get_decoded_frames(UnifexEnv *env, bool flushing, UnifexState *state) {
-  unsigned int frames_length = 0;
-  unsigned int allocated_frames = 4;
-  raw_frame *raw_frames = unifex_alloc(allocated_frames * sizeof(raw_frame));
-
+int get_decoded_frames(UnifexEnv *env, raw_frame_vector *raw_frames, UnifexState *state) {
   int result;
+  raw_frame decoded_frame;
 
-  while ((result = get_decoded_frame(env, &raw_frames[frames_length], state)) == 0) {
-    frames_length++;
-    if (frames_length >= allocated_frames) {
-      allocated_frames *= 2;
-      raw_frames = unifex_realloc(raw_frames, allocated_frames * sizeof(raw_frame));
-    }
+  while ((result = get_decoded_frame(env, &decoded_frame, state)) == 0) {
+    vector_append(raw_frames, decoded_frame);
   }
+  return result;
+}
 
-  if (result == DAV1D_ERR(EAGAIN)) {
-    if (flushing) return flush_result_ok(env, raw_frames, frames_length);
-    else return decode_frame_result_ok(env, raw_frames, frames_length);
-  } else {
-    free_frames(raw_frames, frames_length);
-    return result_error(
-        env,
-        "Error flushing frames",
-        result,
-        flushing ? flush_result_error : decode_frame_result_error,
-        state
-    );
+int decode_data(
+    UnifexEnv *env, Dav1dData data, raw_frame_vector *decoded_frames, UnifexState *state
+) {
+  int result = dav1d_send_data(state->handle, &data);
+
+  // DAV1D_ERR(EAGAIN) returned from dav1d_send_data means that the decoder should
+  // first be drained, then the call should be retried.
+  // DAV1D_ERR(EAGAIN) returned from dav1d_get_picture means that there are no more decoded
+  // frames ready to be received and the decoder should be provided with a new encoded
+  // frame. If despite that the function is called again, it signals EOS to the decoder and all
+  // buffered frames can be received.
+  switch (result) {
+  case DAV1D_ERR(EAGAIN):
+    result = get_decoded_frames(env, decoded_frames, state);
+    if (result == DAV1D_ERR(EAGAIN)) return decode_data(env, data, decoded_frames, state);
+    else return result;
+  case 0:
+    return get_decoded_frames(env, decoded_frames, state);
+  default:
+    return result;
   }
 }
 
 UNIFEX_TERM decode_frame(UnifexEnv *env, encoded_frame encoded_frame, UnifexState *state) {
-  int result;
+  raw_frame_vector decoded_frames = vector_init();
   Dav1dData data = {
       .data = encoded_frame.payload->data,
       .sz = encoded_frame.payload->size,
       .m = {.timestamp = encoded_frame.pts}
   };
 
-  if ((result = dav1d_send_data(state->handle, &data))) {
-    return result_error(
-        env, "Error sending data to the decoder", result, decode_frame_result_error, state
-    );
-  }
+  int result = decode_data(env, data, &decoded_frames, state);
 
-  return get_decoded_frames(env, 0, state);
+  if (result == DAV1D_ERR(EAGAIN)) {
+    return decode_frame_result_ok(env, decoded_frames.data, decoded_frames.length);
+  } else {
+    vector_free(&decoded_frames);
+    return result_error(env, "Error decoding frame", result, decode_frame_result_error, state);
+  }
 }
 
-UNIFEX_TERM flush(UnifexEnv *env, UnifexState *state) { return get_decoded_frames(env, 1, state); }
+UNIFEX_TERM flush(UnifexEnv *env, UnifexState *state) {
+  raw_frame_vector decoded_frames = vector_init();
+  int result = get_decoded_frames(env, &decoded_frames, state);
+
+  if (result == DAV1D_ERR(EAGAIN)) {
+    return flush_result_ok(env, decoded_frames.data, decoded_frames.length);
+  } else {
+    vector_free(&decoded_frames);
+    return result_error(env, "Error flushing the decoder", result, flush_result_error, state);
+  }
+}

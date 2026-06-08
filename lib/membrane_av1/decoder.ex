@@ -98,12 +98,6 @@ defmodule Membrane.AV1.Decoder do
         actions = get_actions_from_frames(raw_frames, ctx.pads[:output].stream_format, state)
         {actions, state}
 
-      # {:ok, [raw_frame]} ->
-      #   {actions, _stream_format} =
-      #     get_actions_from_frame(raw_frame, ctx.pads[:output].stream_format, state)
-      #
-      #   {actions, state}
-
       {:error, reason} ->
         raise "Error decoding frame: #{inspect(reason)}"
     end
