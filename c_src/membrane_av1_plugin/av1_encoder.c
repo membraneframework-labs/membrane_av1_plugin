@@ -12,6 +12,38 @@
 #include "svt-av1/EbSvtAv1Enc.h"
 #include "unifex/unifex.h"
 
+typedef struct encoded_frame_vector {
+  encoded_frame *data;
+  unsigned int length;
+  unsigned int allocated;
+} encoded_frame_vector;
+
+encoded_frame_vector vector_init() {
+  return (encoded_frame_vector){
+      .length = 0, .allocated = 4, .data = unifex_alloc(4 * sizeof(encoded_frame))
+  };
+}
+
+void vector_append(encoded_frame_vector *vec, encoded_frame frame) {
+  if (vec->length >= vec->allocated) {
+    vec->allocated *= 2;
+    vec->data = unifex_realloc(vec->data, vec->allocated * sizeof(encoded_frame));
+  }
+  vec->data[vec->length] = frame;
+  vec->length++;
+}
+
+void vector_free(encoded_frame_vector vec) {
+  for (unsigned int i = 0; i < vec.length; i++) {
+    UnifexPayload *payload = vec.data[i].payload;
+    if (payload != NULL) {
+      unifex_payload_release(payload);
+      unifex_free(payload);
+    }
+  }
+  unifex_free(vec.data);
+}
+
 void handle_destroy_state(UnifexEnv *env, State *state) {
   UNIFEX_UNUSED(env);
 
@@ -275,7 +307,6 @@ EbErrorType get_encoded_frame(
 
   switch (result) {
   case EB_ErrorNone:
-
     if (flushing) {
       *continue_draining = !(out_buffer->flags & EB_BUFFERFLAG_EOS);
     } else if (state->pred_structure == LOW_DELAY) {
@@ -310,17 +341,12 @@ EbErrorType get_encoded_frame(
   return result;
 }
 
-UNIFEX_TERM get_encoded_frames(UnifexEnv *env, int flushing, UnifexState *state) {
+EbErrorType get_encoded_frames(
+    UnifexEnv *env, encoded_frame_vector *encoded_frames, int flushing, UnifexState *state
+) {
   EbErrorType error_type;
-
-  unsigned int frames_length = 0;
-  unsigned int allocated_frames = 1;
-  encoded_frame *encoded_frames = unifex_alloc(allocated_frames * sizeof(encoded_frame));
-  // EbBufferHeaderType *out_buffer;
-
-  // bool is_eos_sentinel;
-  // bool is_alt_ref;
   bool continue_draining;
+  encoded_frame encoded_frame;
 
   // When not using LOW_DELAY, the decoder should be drained until svt_av1_enc_get_packet returns
   // EB_NoErrorEmptyQueue.
@@ -331,70 +357,13 @@ UNIFEX_TERM get_encoded_frames(UnifexEnv *env, int flushing, UnifexState *state)
   // svt_av1_enc_get_packet blocking. The function should continue to be called until it produces an
   // EOS sentinel - a packet with EB_BUFFERFLAG_EOS flag. This packet can contain data, but doesn't
   // have to.
-  // while ((error_type = get_encoded_frame(
-  //             env, flushing, &encoded_frames[frames_length], &continue_draining, state
-  //         )) == EB_ErrorNone) {
   do {
-    if (frames_length >= allocated_frames) {
-      allocated_frames *= 2;
-      encoded_frames = unifex_realloc(encoded_frames, allocated_frames * sizeof(encoded_frame));
-    }
-
-    error_type =
-        get_encoded_frame(env, flushing, &encoded_frames[frames_length], &continue_draining, state);
-    // do {
-    // error_type = svt_av1_enc_get_packet(state->handle, &out_buffer, flushing);
-    // if (error_type != EB_ErrorNone) break;
+    error_type = get_encoded_frame(env, flushing, &encoded_frame, &continue_draining, state);
     if (error_type != EB_ErrorNone) break;
-
-    frames_length++;
-
-    // if (out_buffer->n_filled_len > 0) {
-    //   encoded_frame *frame = &encoded_frames[frames_length];
-    //   frame->payload = unifex_alloc(sizeof(UnifexPayload));
-    //   unifex_payload_alloc(env, UNIFEX_PAYLOAD_BINARY, out_buffer->n_filled_len, frame->payload);
-    //   memcpy(frame->payload->data, out_buffer->p_buffer, out_buffer->n_filled_len);
-    //   frame->pts = out_buffer->pts;
-    //   frame->dts = out_buffer->dts;
-    //   frame->is_keyframe = out_buffer->pic_type == EB_AV1_KEY_PICTURE;
-    //   frames_length++;
-    // }
-    //
-    // svt_av1_enc_release_out_buffer(&out_buffer);
-
-    // is_eos_sentinel = out_buffer->flags & EB_BUFFERFLAG_EOS;
-    // is_alt_ref = out_buffer->flags & EB_BUFFERFLAG_IS_ALT_REF;
-    //
-    // if (flushing) {
-    //   continue_draining = !is_eos_sentinel;
-    // } else if (state->pred_structure == LOW_DELAY) {
-    //   continue_draining = is_alt_ref;
-    // } else {
-    //   continue_draining = true;
-    // }
-    //
+    vector_append(encoded_frames, encoded_frame);
   } while (continue_draining);
-  printf("Finished loop, was flushing: %d\n", flushing);
 
-  UNIFEX_TERM result;
-
-  if (error_type == EB_NoErrorEmptyQueue || error_type == EB_ErrorNone) {
-    if (flushing) result = flush_result_ok(env, encoded_frames, frames_length);
-    else result = encode_frame_result_ok(env, encoded_frames, frames_length);
-
-  } else {
-    // svt_av1_enc_release_out_buffer(&out_buffer);
-    free_frames(encoded_frames, frames_length);
-    result = result_error(
-        env,
-        "Error retrieving encoded frame",
-        error_type,
-        flushing ? flush_result_error : encode_frame_result_error,
-        state
-    );
-  }
-
-  return result;
+  return error_type;
 }
 
 UNIFEX_TERM encode_frame(
@@ -423,23 +392,46 @@ UNIFEX_TERM encode_frame(
         env, "Error sending image to the encoder", error_type, encode_frame_result_error, state
     );
   }
+  encoded_frame_vector encoded_frame_vector = vector_init();
+  error_type = get_encoded_frames(env, &encoded_frame_vector, 0, state);
 
-  return get_encoded_frames(env, 0, state);
+  UNIFEX_TERM unifex_result;
+  if (error_type == EB_NoErrorEmptyQueue || error_type == EB_ErrorNone) {
+    unifex_result =
+        encode_frame_result_ok(env, encoded_frame_vector.data, encoded_frame_vector.length);
+  } else {
+    unifex_result = result_error(
+        env, "Error getting encoded frames", error_type, encode_frame_result_error, state
+    );
+  }
+  vector_free(encoded_frame_vector);
+  return unifex_result;
 }
 
 UNIFEX_TERM flush(UnifexEnv *env, UnifexState *state) {
-  EbErrorType error_type;
-  if ((error_type = svt_av1_enc_send_picture(
-           state->handle,
-           &(EbBufferHeaderType){
-               .flags = EB_BUFFERFLAG_EOS,
-               .pic_type = EB_AV1_INVALID_PICTURE,
-           }
-       ))) {
+  EbErrorType error_type = svt_av1_enc_send_picture(
+      state->handle,
+      &(EbBufferHeaderType){
+          .flags = EB_BUFFERFLAG_EOS,
+          .pic_type = EB_AV1_INVALID_PICTURE,
+      }
+  );
+
+  if (error_type) {
     return result_error(
         env, "Error sending EOS sentinel to the encoder", error_type, flush_result_error, state
     );
-  } else {
-    return get_encoded_frames(env, 1, state);
   }
+  encoded_frame_vector encoded_frame_vector = vector_init();
+  error_type = get_encoded_frames(env, &encoded_frame_vector, 1, state);
+
+  UNIFEX_TERM unifex_result;
+  if (error_type == EB_NoErrorEmptyQueue || error_type == EB_ErrorNone) {
+    unifex_result = flush_result_ok(env, encoded_frame_vector.data, encoded_frame_vector.length);
+  } else {
+    unifex_result =
+        result_error(env, "Error flushing the encoder", error_type, flush_result_error, state);
+  }
+  vector_free(encoded_frame_vector);
+  return unifex_result;
 }

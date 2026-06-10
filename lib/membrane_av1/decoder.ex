@@ -20,7 +20,7 @@ defmodule Membrane.AV1.Decoder do
                 spec: pos_integer() | :auto,
                 default: :auto,
                 description: """
-                Number of threads that the encoder will use. If set to `:auto` then the number of
+                Number of threads that the decoder will use. If set to `:auto` then the number of
                 logical cores in the host system will be assumed.
                 """
               ],

@@ -34,15 +34,15 @@ void vector_append(raw_frame_vector *vec, raw_frame frame) {
   vec->length++;
 }
 
-void vector_free(raw_frame_vector *vec) {
-  for (unsigned int i = 0; i < vec->length; i++) {
-    UnifexPayload *payload = vec->data[i].payload;
+void vector_free(raw_frame_vector vec) {
+  for (unsigned int i = 0; i < vec.length; i++) {
+    UnifexPayload *payload = vec.data[i].payload;
     if (payload != NULL) {
       unifex_payload_release(payload);
       unifex_free(payload);
     }
   }
-  unifex_free(vec->data);
+  unifex_free(vec.data);
 }
 
 void handle_destroy_state(UnifexEnv *env, State *state) {
@@ -129,17 +129,6 @@ void get_payload_from_picture(UnifexEnv *env, Dav1dPicture picture, UnifexPayloa
   }
 }
 
-void free_frames(raw_frame *frames, unsigned int frames_length) {
-  for (unsigned int i = 0; i < frames_length; i++) {
-    UnifexPayload *payload = frames[i].payload;
-    if (payload != NULL) {
-      unifex_payload_release(payload);
-      unifex_free(payload);
-    }
-  }
-  unifex_free(frames);
-}
-
 int get_decoded_frame(UnifexEnv *env, raw_frame *output_frame, UnifexState *state) {
 
   Dav1dPicture output_picture;
@@ -220,23 +209,28 @@ UNIFEX_TERM decode_frame(UnifexEnv *env, encoded_frame encoded_frame, UnifexStat
   };
 
   int result = decode_data(env, data, &decoded_frames, state);
-
+  UNIFEX_TERM unifex_result;
   if (result == DAV1D_ERR(EAGAIN)) {
-    return decode_frame_result_ok(env, decoded_frames.data, decoded_frames.length);
+    unifex_result = decode_frame_result_ok(env, decoded_frames.data, decoded_frames.length);
   } else {
-    vector_free(&decoded_frames);
-    return result_error(env, "Error decoding frame", result, decode_frame_result_error, state);
+    unifex_result =
+        result_error(env, "Error decoding frame", result, decode_frame_result_error, state);
   }
+  vector_free(decoded_frames);
+  return unifex_result;
 }
 
 UNIFEX_TERM flush(UnifexEnv *env, UnifexState *state) {
   raw_frame_vector decoded_frames = vector_init();
-  int result = get_decoded_frames(env, &decoded_frames, state);
 
+  int result = get_decoded_frames(env, &decoded_frames, state);
+  UNIFEX_TERM unifex_result;
   if (result == DAV1D_ERR(EAGAIN)) {
-    return flush_result_ok(env, decoded_frames.data, decoded_frames.length);
+    unifex_result = flush_result_ok(env, decoded_frames.data, decoded_frames.length);
   } else {
-    vector_free(&decoded_frames);
-    return result_error(env, "Error flushing the decoder", result, flush_result_error, state);
+    unifex_result =
+        result_error(env, "Error flushing the decoder", result, flush_result_error, state);
   }
+  vector_free(decoded_frames);
+  return unifex_result;
 }
