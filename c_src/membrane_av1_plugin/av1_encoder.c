@@ -309,11 +309,13 @@ EbErrorType get_encoded_frame(
   case EB_ErrorNone:
     if (flushing) {
       *continue_draining = !(out_buffer->flags & EB_BUFFERFLAG_EOS);
-    } else if (state->pred_structure == LOW_DELAY) {
-      *continue_draining = out_buffer->flags & EB_BUFFERFLAG_IS_ALT_REF;
     } else {
-      *continue_draining = true;
+      *continue_draining = (state->pred_structure != LOW_DELAY);
     }
+    // *continue_draining = out_buffer->flags & EB_BUFFERFLAG_IS_ALT_REF;
+    // } else {
+    //   *continue_draining = true;
+    // }
 
     if (out_buffer->n_filled_len == 0) {
       result = EB_NoErrorEmptyQueue;

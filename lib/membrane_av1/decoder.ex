@@ -1,6 +1,6 @@
 defmodule Membrane.AV1.Decoder do
   @moduledoc """
-  AV1 Decoder based on dav1d library.
+  AV1 Decoder based on [dav1d library](https://www.videolan.org/projects/dav1d.html).
   """
   use Membrane.Filter
 
@@ -11,24 +11,27 @@ defmodule Membrane.AV1.Decoder do
   alias Membrane.Buffer
 
   def_input_pad :input,
-    accepted_format: AV1
+    accepted_format: %AV1{alignment: :tu}
 
   def_output_pad :output,
     accepted_format: %RawVideo{aligned: true}
 
-  def_options threads: [
+  def_options n_threads: [
                 spec: pos_integer() | :auto,
                 default: :auto,
                 description: """
-                Number of threads that the decoder will use. If set to `:auto` then the number of
+                Number of n_threads that the decoder will use. If set to `:auto`, then the number of
                 logical cores in the host system will be assumed.
                 """
               ],
-              low_latency: [
-                spec: boolean(),
-                default: false,
+              max_frame_delay: [
+                spec: pos_integer() | :auto,
+                default: :auto,
                 description: """
-                Determines whether the decoder will operate in low latency mode.
+                Determines the maximum amount of frames that the decoder will buffer, and in turn
+                delay the output by that amount. If the decoder should operate in low latency mode,
+                this option should be set to 1. If set to `:auto`, then value of
+                `ceil(sqrt(n_threads))` will be assumed.
                 """
               ]
 
@@ -64,23 +67,28 @@ defmodule Membrane.AV1.Decoder do
 
     @type t :: %__MODULE__{decoder_ref: reference(), framerate: AV1.framerate()}
 
-    @enforce_keys [:decoder_ref]
+    @enforce_keys [:n_threads, :max_frame_delay]
     defstruct @enforce_keys ++
                 [
+                  decoder_ref: nil,
                   framerate: nil
                 ]
   end
 
   @impl true
   def handle_init(_ctx, opts) do
-    n_threads =
-      case opts.threads do
-        :auto -> 0
-        n -> n
-      end
+    {[], %State{n_threads: opts.n_threads, max_frame_delay: opts.max_frame_delay}}
+  end
 
-    {:ok, decoder_ref} = Native.create(n_threads, opts.low_latency)
-    {[], %State{decoder_ref: decoder_ref}}
+  @impl true
+  def handle_setup(_ctx, %State{} = state) do
+    {:ok, decoder_ref} =
+      Native.create(
+        if(state.n_threads == :auto, do: 0, else: state.n_threads),
+        if(state.max_frame_delay == :auto, do: 0, else: state.max_frame_delay)
+      )
+
+    {[], %State{state | decoder_ref: decoder_ref}}
   end
 
   @impl true
