@@ -17,7 +17,7 @@ defmodule Membrane.AV1.EncoderTest do
     end
 
     test "for low-delay", %{tmp_dir: tmp_dir} do
-      perform_encoder_test(tmp_dir, @input, "ref_default.ivf", %AV1.Encoder{
+      perform_encoder_test(tmp_dir, @input, "ref_low_delay.ivf", %AV1.Encoder{
         prediction_structure: :low_delay
       })
     end

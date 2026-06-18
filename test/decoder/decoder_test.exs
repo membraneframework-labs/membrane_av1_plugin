@@ -15,6 +15,12 @@ defmodule Membrane.AV1.DecoderTest do
     test "for default settings", %{tmp_dir: tmp_dir} do
       perform_decoder_test(tmp_dir, @input, "ref_yuv420p_1080_720_default.raw", %AV1.Decoder{})
     end
+
+    test "with low-latency max_frame_delay", %{tmp_dir: tmp_dir} do
+      perform_decoder_test(tmp_dir, @input, "ref_yuv420p_1080_720_default.raw", %AV1.Decoder{
+        max_frame_delay: 1
+      })
+    end
   end
 
   defp perform_decoder_test(tmp_dir, input_file, ref_file, decoder_struct) do

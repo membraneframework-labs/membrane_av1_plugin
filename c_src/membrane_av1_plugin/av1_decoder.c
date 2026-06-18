@@ -67,14 +67,14 @@ UNIFEX_TERM result_error(
   return result;
 }
 
-UNIFEX_TERM create(UnifexEnv *env, unsigned int n_threads, int low_latency) {
+UNIFEX_TERM create(UnifexEnv *env, unsigned int n_threads, unsigned int max_frame_delay) {
   State *state = unifex_alloc_state(env);
   int result;
 
   Dav1dSettings settings;
   dav1d_default_settings(&settings);
   settings.n_threads = n_threads;
-  settings.max_frame_delay = low_latency;
+  settings.max_frame_delay = max_frame_delay;
 
   if ((result = dav1d_open(&state->handle, &settings))) {
     return result_error(env, "Error initializing decoder", result, create_result_error, state);

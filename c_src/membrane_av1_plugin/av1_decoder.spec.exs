@@ -17,7 +17,7 @@ type raw_frame :: %RawFrame{
        height: unsigned
      }
 
-spec create(n_threads :: unsigned, low_latency :: bool) ::
+spec create(n_threads :: unsigned, low_latency :: unsigned) ::
        {:ok :: label, state} | {:error :: label, reason :: string}
 
 spec decode_frame(encoded_frame :: encoded_frame, state :: state) ::

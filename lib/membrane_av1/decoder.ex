@@ -17,7 +17,7 @@ defmodule Membrane.AV1.Decoder do
     accepted_format: %RawVideo{aligned: true}
 
   def_options n_threads: [
-                spec: pos_integer() | :auto,
+                spec: n_threads(),
                 default: :auto,
                 description: """
                 Number of n_threads that the decoder will use. If set to `:auto`, then the number of
@@ -25,7 +25,7 @@ defmodule Membrane.AV1.Decoder do
                 """
               ],
               max_frame_delay: [
-                spec: pos_integer() | :auto,
+                spec: max_frame_delay(),
                 default: :auto,
                 description: """
                 Determines the maximum amount of frames that the decoder will buffer, and in turn
@@ -34,6 +34,9 @@ defmodule Membrane.AV1.Decoder do
                 `ceil(sqrt(n_threads))` will be assumed.
                 """
               ]
+
+  @type n_threads :: pos_integer() | :auto
+  @type max_frame_delay :: pos_integer() | :auto
 
   defmodule EncodedFrame do
     @moduledoc false
@@ -65,13 +68,20 @@ defmodule Membrane.AV1.Decoder do
   defmodule State do
     @moduledoc false
 
-    @type t :: %__MODULE__{decoder_ref: reference(), framerate: AV1.framerate()}
+    @type t :: %__MODULE__{
+            n_threads: AV1.Decoder.n_threads(),
+            max_frame_delay: AV1.Decoder.max_frame_delay(),
+            decoder_ref: reference(),
+            framerate: AV1.framerate() | nil,
+            current_output_stream_format: RawVideo.t() | nil
+          }
 
     @enforce_keys [:n_threads, :max_frame_delay]
     defstruct @enforce_keys ++
                 [
                   decoder_ref: nil,
-                  framerate: nil
+                  framerate: nil,
+                  current_output_stream_format: nil
                 ]
   end
 
@@ -97,14 +107,13 @@ defmodule Membrane.AV1.Decoder do
   end
 
   @impl true
-  def handle_buffer(:input, buffer, ctx, state) do
+  def handle_buffer(:input, buffer, _ctx, state) do
     case Native.decode_frame(
            %EncodedFrame{payload: buffer.payload, pts: buffer.pts},
            state.decoder_ref
          ) do
       {:ok, raw_frames} ->
-        actions = get_actions_from_frames(raw_frames, ctx.pads[:output].stream_format, state)
-        {actions, state}
+        get_actions_from_frames(raw_frames, state)
 
       {:error, reason} ->
         raise "Error decoding frame: #{inspect(reason)}"
@@ -112,10 +121,10 @@ defmodule Membrane.AV1.Decoder do
   end
 
   @impl true
-  def handle_end_of_stream(:input, ctx, state) do
+  def handle_end_of_stream(:input, _ctx, state) do
     case Native.flush(state.decoder_ref) do
       {:ok, raw_frames} ->
-        actions = get_actions_from_frames(raw_frames, ctx.pads[:output].stream_format, state)
+        {actions, state} = get_actions_from_frames(raw_frames, state)
 
         {actions ++ [end_of_stream: :output], state}
 
@@ -124,45 +133,40 @@ defmodule Membrane.AV1.Decoder do
     end
   end
 
-  @spec get_actions_from_frames([RawFrame.t()], RawVideo.t() | nil, State.t()) :: [
-          Membrane.Element.Action.buffer() | Membrane.Element.Action.stream_format()
-        ]
-  defp get_actions_from_frames(raw_frames, current_stream_format, state) do
-    {actions, _stream_format} =
-      Enum.flat_map_reduce(
-        raw_frames,
-        current_stream_format,
-        &get_actions_from_frame(&1, &2, state)
-      )
-
-    actions
+  @spec get_actions_from_frames([RawFrame.t()], State.t()) ::
+          {[Membrane.Element.Action.buffer() | Membrane.Element.Action.stream_format()],
+           State.t()}
+  defp get_actions_from_frames(raw_frames, %State{} = state) do
+    Enum.flat_map_reduce(raw_frames, state, &get_actions_from_frame(&1, &2))
   end
 
-  @spec get_actions_from_frame(RawFrame.t(), RawVideo.t() | nil, State.t()) ::
+  @spec get_actions_from_frame(RawFrame.t(), State.t()) ::
           {[Membrane.Element.Action.buffer() | Membrane.Element.Action.stream_format()],
-           RawVideo.t()}
-  defp get_actions_from_frame(raw_frame, current_stream_format, state) do
+           State.t()}
+  defp get_actions_from_frame(raw_frame, %State{} = state) do
     buffer_action = [
       buffer: {:output, %Buffer{payload: raw_frame.payload, pts: raw_frame.pts}}
     ]
 
-    case maybe_get_new_stream_format(current_stream_format, raw_frame, state) do
+    case maybe_get_new_stream_format(raw_frame, state) do
       nil ->
-        {buffer_action, current_stream_format}
+        {buffer_action, state}
 
-      new_stream_format ->
-        {[stream_format: {:output, new_stream_format}] ++ buffer_action, new_stream_format}
+      new_output_stream_format ->
+        {[stream_format: {:output, new_output_stream_format}] ++ buffer_action,
+         %State{state | current_output_stream_format: new_output_stream_format}}
     end
   end
 
-  @spec maybe_get_new_stream_format(RawVideo.t() | nil, RawFrame.t(), State.t()) ::
+  @spec maybe_get_new_stream_format(RawFrame.t(), State.t()) ::
           RawVideo.t() | nil
-  defp maybe_get_new_stream_format(current_stream_format, raw_frame, state) do
+  defp maybe_get_new_stream_format(raw_frame, state) do
     common_keys = [:pixel_format, :width, :height]
 
-    if current_stream_format == nil or
-         Map.take(current_stream_format, common_keys) != Map.take(raw_frame, common_keys) or
-         state.framerate not in [nil, current_stream_format.framerate] do
+    if state.current_output_stream_format == nil or
+         Map.take(state.current_output_stream_format, common_keys) !=
+           Map.take(raw_frame, common_keys) or
+         state.framerate not in [nil, state.current_output_stream_format.framerate] do
       %RawVideo{
         width: raw_frame.width,
         height: raw_frame.height,
