@@ -127,17 +127,6 @@ UNIFEX_TERM result_error(
   return result;
 }
 
-void free_frames(encoded_frame *frames, unsigned int frames_length) {
-  for (unsigned int i = 0; i < frames_length; i++) {
-    UnifexPayload *payload = frames[i].payload;
-    if (payload != NULL) {
-      unifex_payload_release(payload);
-      unifex_free(payload);
-    }
-  }
-  unifex_free(frames);
-}
-
 EbSvtIOFormat get_image_from_raw_frame(raw_frame raw_frame) {
   // only YUV420 subsampling is supported
   size_t luma_size = (size_t)raw_frame.width * raw_frame.height;

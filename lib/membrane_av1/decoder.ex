@@ -73,9 +73,10 @@ defmodule Membrane.AV1.Decoder do
             pts: integer(),
             pixel_format: RawVideo.pixel_format(),
             width: non_neg_integer(),
-            height: non_neg_integer()
+            height: non_neg_integer(),
+            framerate: Framerate.t()
           }
-    @enforce_keys [:payload, :pts, :pixel_format, :width, :height]
+    @enforce_keys [:payload, :pts, :pixel_format, :width, :height, :framerate]
 
     defstruct @enforce_keys
   end

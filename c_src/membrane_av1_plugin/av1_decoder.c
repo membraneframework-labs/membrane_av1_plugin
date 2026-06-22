@@ -85,7 +85,7 @@ UNIFEX_TERM create(UnifexEnv *env, unsigned int n_threads, unsigned int max_fram
 }
 
 void get_payload_from_picture(UnifexEnv *env, Dav1dPicture picture, UnifexPayload *payload) {
-  int chroma_h, chroma_w;
+  int chroma_h = 0, chroma_w = 0;
   switch (picture.p.layout) {
   case DAV1D_PIXEL_LAYOUT_I400:
     chroma_h = 0;
