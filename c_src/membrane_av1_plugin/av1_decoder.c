@@ -11,9 +11,10 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
-typedef struct frames_vector {
+typedef struct {
   raw_frame *data;
   unsigned int length;
   unsigned int allocated;
@@ -158,6 +159,7 @@ int get_decoded_frame(UnifexEnv *env, raw_frame *output_frame, UnifexState *stat
     output_frame->height = output_picture.p.h;
     output_frame->width = output_picture.p.w;
     output_frame->pts = output_picture.m.timestamp;
+    output_frame->framerate = *(framerate *)output_picture.m.user_data.data;
     output_frame->payload = unifex_alloc(sizeof(UnifexPayload));
     get_payload_from_picture(env, output_picture, output_frame->payload);
 
@@ -196,19 +198,33 @@ int decode_data(
   case 0:
     return get_decoded_frames(env, decoded_frames, state);
   default:
+    dav1d_data_unref(&data);
     return result;
   }
 }
 
-UNIFEX_TERM decode_frame(UnifexEnv *env, encoded_frame encoded_frame, UnifexState *state) {
-  raw_frame_vector decoded_frames = vector_init();
+void free_framerate_callback(const uint8_t *framerate_data, void *cookie) {
+  UNIFEX_UNUSED(cookie);
+  unifex_free((void *)framerate_data);
+}
+
+Dav1dData create_data(encoded_frame encoded_frame) {
   Dav1dData data = {
       .data = encoded_frame.payload->data,
       .sz = encoded_frame.payload->size,
       .m = {.timestamp = encoded_frame.pts}
   };
+  framerate *fr = unifex_alloc(sizeof(framerate));
+  *fr = encoded_frame.framerate;
+  dav1d_data_wrap_user_data(&data, (const uint8_t *)fr, free_framerate_callback, NULL);
+  return data;
+}
 
+UNIFEX_TERM decode_frame(UnifexEnv *env, encoded_frame encoded_frame, UnifexState *state) {
+  raw_frame_vector decoded_frames = vector_init();
+  Dav1dData data = create_data(encoded_frame);
   int result = decode_data(env, data, &decoded_frames, state);
+
   UNIFEX_TERM unifex_result;
   if (result == DAV1D_ERR(EAGAIN)) {
     unifex_result = decode_frame_result_ok(env, decoded_frames.data, decoded_frames.length);

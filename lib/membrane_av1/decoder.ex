@@ -38,14 +38,29 @@ defmodule Membrane.AV1.Decoder do
   @type n_threads :: pos_integer() | :auto
   @type max_frame_delay :: pos_integer() | :auto
 
+  defmodule Framerate do
+    @moduledoc false
+    # %Framerate{numerator: 0, denominator: 1} should be interpreted as `nil`
+
+    @type t :: %__MODULE__{
+            numerator: non_neg_integer(),
+            denominator: pos_integer()
+          }
+
+    @enforce_keys [:numerator, :denominator]
+
+    defstruct @enforce_keys
+  end
+
   defmodule EncodedFrame do
     @moduledoc false
 
     @type t :: %__MODULE__{
             payload: binary(),
-            pts: integer()
+            pts: integer(),
+            framerate: Framerate.t()
           }
-    @enforce_keys [:payload, :pts]
+    @enforce_keys [:payload, :pts, :framerate]
 
     defstruct @enforce_keys
   end
@@ -71,7 +86,7 @@ defmodule Membrane.AV1.Decoder do
     @type t :: %__MODULE__{
             n_threads: AV1.Decoder.n_threads(),
             max_frame_delay: AV1.Decoder.max_frame_delay(),
-            decoder_ref: reference(),
+            decoder_ref: reference() | nil,
             framerate: AV1.framerate() | nil,
             current_output_stream_format: RawVideo.t() | nil
           }
@@ -108,10 +123,14 @@ defmodule Membrane.AV1.Decoder do
 
   @impl true
   def handle_buffer(:input, buffer, _ctx, state) do
-    case Native.decode_frame(
-           %EncodedFrame{payload: buffer.payload, pts: buffer.pts},
-           state.decoder_ref
-         ) do
+    encoded_frame =
+      %EncodedFrame{
+        payload: buffer.payload,
+        pts: buffer.pts,
+        framerate: serialize_framerate(state.framerate)
+      }
+
+    case Native.decode_frame(encoded_frame, state.decoder_ref) do
       {:ok, raw_frames} ->
         get_actions_from_frames(raw_frames, state)
 
@@ -137,13 +156,15 @@ defmodule Membrane.AV1.Decoder do
           {[Membrane.Element.Action.buffer() | Membrane.Element.Action.stream_format()],
            State.t()}
   defp get_actions_from_frames(raw_frames, %State{} = state) do
-    Enum.flat_map_reduce(raw_frames, state, &get_actions_from_frame(&1, &2))
+    Enum.flat_map_reduce(raw_frames, state, &get_actions_from_frame/2)
   end
 
   @spec get_actions_from_frame(RawFrame.t(), State.t()) ::
           {[Membrane.Element.Action.buffer() | Membrane.Element.Action.stream_format()],
            State.t()}
   defp get_actions_from_frame(raw_frame, %State{} = state) do
+    raw_frame = update_in(raw_frame.framerate, &deserialize_framerate/1)
+
     buffer_action = [
       buffer: {:output, %Buffer{payload: raw_frame.payload, pts: raw_frame.pts}}
     ]
@@ -161,21 +182,36 @@ defmodule Membrane.AV1.Decoder do
   @spec maybe_get_new_stream_format(RawFrame.t(), State.t()) ::
           RawVideo.t() | nil
   defp maybe_get_new_stream_format(raw_frame, state) do
-    common_keys = [:pixel_format, :width, :height]
+    common_keys = [:pixel_format, :width, :height, :framerate]
 
     if state.current_output_stream_format == nil or
          Map.take(state.current_output_stream_format, common_keys) !=
-           Map.take(raw_frame, common_keys) or
-         state.framerate not in [nil, state.current_output_stream_format.framerate] do
+           Map.take(raw_frame, common_keys) do
       %RawVideo{
         width: raw_frame.width,
         height: raw_frame.height,
         pixel_format: raw_frame.pixel_format,
         aligned: true,
-        framerate: state.framerate
+        framerate: raw_frame.framerate
       }
     else
       nil
+    end
+  end
+
+  @spec serialize_framerate(AV1.framerate() | nil) :: Framerate.t()
+  defp serialize_framerate(framerate) do
+    case framerate do
+      nil -> %Framerate{numerator: 0, denominator: 1}
+      {numerator, denominator} -> %Framerate{numerator: numerator, denominator: denominator}
+    end
+  end
+
+  @spec deserialize_framerate(Framerate.t()) :: RawVideo.framerate() | nil
+  defp deserialize_framerate(framerate) do
+    case framerate do
+      %{numerator: 0, denominator: 1} -> nil
+      %{numerator: numerator, denominator: denominator} -> {numerator, denominator}
     end
   end
 end

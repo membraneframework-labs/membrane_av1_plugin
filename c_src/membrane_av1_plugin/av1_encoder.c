@@ -12,7 +12,7 @@
 #include "svt-av1/EbSvtAv1Enc.h"
 #include "unifex/unifex.h"
 
-typedef struct encoded_frame_vector {
+typedef struct {
   encoded_frame *data;
   unsigned int length;
   unsigned int allocated;
@@ -312,10 +312,6 @@ EbErrorType get_encoded_frame(
     } else {
       *continue_draining = (state->pred_structure != LOW_DELAY);
     }
-    // *continue_draining = out_buffer->flags & EB_BUFFERFLAG_IS_ALT_REF;
-    // } else {
-    //   *continue_draining = true;
-    // }
 
     if (out_buffer->n_filled_len == 0) {
       result = EB_NoErrorEmptyQueue;

@@ -4,14 +4,21 @@ state_type "State"
 
 type pixel_format :: :I420 | :I422 | :I444
 
+type framerate :: %Framerate{
+       numerator: unsigned,
+       denominator: unsigned
+     }
+
 type encoded_frame :: %EncodedFrame{
        payload: payload,
-       pts: int64
+       pts: int64,
+       framerate: framerate
      }
 
 type raw_frame :: %RawFrame{
        payload: payload,
        pts: int64,
+       framerate: framerate,
        pixel_format: pixel_format,
        width: unsigned,
        height: unsigned
