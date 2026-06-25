@@ -71,8 +71,7 @@ defmodule Membrane.AV1.Encoder do
                 - `:low_delay` - Frames can only reference previous frames. Additionally no frames
                   are buffered, each input frame will result in an encoded output frame. Forced for
                   real time coding.
-                - `:random_access` - Encoder can produce frames which will be shown in the future, but
-                  that can serve as a reference for frames that will be shown before them.
+                - `:random_access` - Encoder can produce frames with backward references.
                 """
               ],
               intra_refresh_type: [

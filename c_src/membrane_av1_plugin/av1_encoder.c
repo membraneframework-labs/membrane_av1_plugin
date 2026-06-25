@@ -33,15 +33,18 @@ void vector_append(encoded_frame_vector *vec, encoded_frame frame) {
   vec->length++;
 }
 
-void vector_free(encoded_frame_vector vec) {
-  for (unsigned int i = 0; i < vec.length; i++) {
-    UnifexPayload *payload = vec.data[i].payload;
+void vector_free(encoded_frame_vector *vec) {
+  for (unsigned int i = 0; i < vec->length; i++) {
+    UnifexPayload *payload = vec->data[i].payload;
     if (payload != NULL) {
       unifex_payload_release(payload);
       unifex_free(payload);
     }
   }
-  unifex_free(vec.data);
+  unifex_free(vec->data);
+  vec->data = NULL;
+  vec->allocated = 0;
+  vec->length = 0;
 }
 
 void handle_destroy_state(UnifexEnv *env, State *state) {
@@ -391,7 +394,7 @@ UNIFEX_TERM encode_frame(
         env, "Error getting encoded frames", error_type, encode_frame_result_error, state
     );
   }
-  vector_free(encoded_frame_vector);
+  vector_free(&encoded_frame_vector);
   return unifex_result;
 }
 
@@ -419,6 +422,6 @@ UNIFEX_TERM flush(UnifexEnv *env, UnifexState *state) {
     unifex_result =
         result_error(env, "Error flushing the encoder", error_type, flush_result_error, state);
   }
-  vector_free(encoded_frame_vector);
+  vector_free(&encoded_frame_vector);
   return unifex_result;
 }

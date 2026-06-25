@@ -35,15 +35,18 @@ void vector_append(raw_frame_vector *vec, raw_frame frame) {
   vec->length++;
 }
 
-void vector_free(raw_frame_vector vec) {
-  for (unsigned int i = 0; i < vec.length; i++) {
-    UnifexPayload *payload = vec.data[i].payload;
+void vector_free(raw_frame_vector *vec) {
+  for (unsigned int i = 0; i < vec->length; i++) {
+    UnifexPayload *payload = vec->data[i].payload;
     if (payload != NULL) {
       unifex_payload_release(payload);
       unifex_free(payload);
     }
   }
-  unifex_free(vec.data);
+  unifex_free(vec->data);
+  vec->data = NULL;
+  vec->allocated = 0;
+  vec->length = 0;
 }
 
 void handle_destroy_state(UnifexEnv *env, State *state) {
@@ -232,7 +235,7 @@ UNIFEX_TERM decode_frame(UnifexEnv *env, encoded_frame encoded_frame, UnifexStat
     unifex_result =
         result_error(env, "Error decoding frame", result, decode_frame_result_error, state);
   }
-  vector_free(decoded_frames);
+  vector_free(&decoded_frames);
   return unifex_result;
 }
 
@@ -247,6 +250,6 @@ UNIFEX_TERM flush(UnifexEnv *env, UnifexState *state) {
     unifex_result =
         result_error(env, "Error flushing the decoder", result, flush_result_error, state);
   }
-  vector_free(decoded_frames);
+  vector_free(&decoded_frames);
   return unifex_result;
 }
