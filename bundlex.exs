@@ -22,6 +22,18 @@ defmodule Membrane.AV1.BundlexProject do
           ]
         ],
         preprocessor: Unifex
+      ],
+      av1_decoder: [
+        interface: :nif,
+        sources: ["av1_decoder.c"],
+        os_deps: [
+          dav1d: [
+            {:precompiled,
+             Membrane.PrecompiledDependencyProvider.get_dependency_url(:dav1d, version: "1.5.3")},
+            {:pkg_config, "dav1d"}
+          ]
+        ],
+        preprocessor: Unifex
       ]
     ]
   end

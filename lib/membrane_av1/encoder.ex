@@ -23,7 +23,7 @@ defmodule Membrane.AV1.Encoder do
     accepted_format: %Membrane.RawVideo{pixel_format: :I420, aligned: true}
 
   def_output_pad :output,
-    accepted_format: AV1
+    accepted_format: %AV1{alignment: :tu}
 
   @fallback_framerate {30, 1}
 
@@ -71,7 +71,7 @@ defmodule Membrane.AV1.Encoder do
                 - `:low_delay` - Frames can only reference previous frames. Additionally no frames
                   are buffered, each input frame will result in an encoded output frame. Forced for
                   real time coding.
-                - `:random_access` - B-frames are allowed.
+                - `:random_access` - Encoder can produce frames with backward references.
                 """
               ],
               intra_refresh_type: [

@@ -1,7 +1,7 @@
 defmodule Membrane.AV1.Plugin.Mixfile do
   use Mix.Project
 
-  @version "0.1.1"
+  @version "0.2.0"
   @github_url "https://github.com/membraneframework/membrane_av1_plugin"
 
   def project do
@@ -42,7 +42,7 @@ defmodule Membrane.AV1.Plugin.Mixfile do
       {:membrane_core, "~> 1.0"},
       {:unifex, "~> 1.2"},
       {:membrane_precompiled_dependency_provider, "~> 0.2.2"},
-      {:membrane_av1_format, "~> 0.2.0"},
+      {:membrane_av1_format, "~> 0.3.0"},
       {:membrane_ivf_plugin, "~> 0.9.0"},
       {:membrane_raw_video_format, "~> 0.4.0"},
       {:membrane_raw_video_parser_plugin, "~> 0.12.1"},
