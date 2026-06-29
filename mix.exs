@@ -46,7 +46,7 @@ defmodule Membrane.AV1.Plugin.Mixfile do
       {:membrane_ivf_plugin, "~> 0.9.0"},
       {:membrane_raw_video_format, "~> 0.4.0"},
       {:membrane_raw_video_parser_plugin, "~> 0.12.1"},
-      {:ex_doc, "~> 0.40", only: :dev, runtime: false},
+      {:ex_doc, ">= 0.40.0", only: :dev, runtime: false},
       {:dialyxir, ">= 0.0.0", only: :dev, runtime: false},
       {:credo, ">= 0.0.0", only: :dev, runtime: false}
     ]
