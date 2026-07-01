@@ -123,7 +123,7 @@ defmodule Membrane.AV1.Encoder do
               ]
 
   @level_to_config_param %{
-    auto: 0,
+    nil: 0,
     "2.0": 20,
     "2.1": 21,
     "3.0": 30,
@@ -214,7 +214,7 @@ defmodule Membrane.AV1.Encoder do
             rate_control: AV1.Encoder.rate_control(),
             prediction_structure: AV1.Encoder.prediction_structure(),
             intra_refresh_type: AV1.Encoder.intra_refresh_type(),
-            level: AV1.level(),
+            level: AV1.level() | nil,
             approx_framerate: AV1.framerate(),
             config_parameters: %{String.t() => String.t()},
             encoder_ref: reference() | nil,
