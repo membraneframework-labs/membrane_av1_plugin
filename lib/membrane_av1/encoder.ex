@@ -95,10 +95,10 @@ defmodule Membrane.AV1.Encoder do
                 """
               ],
               level: [
-                spec: AV1.level() | :auto,
-                default: :auto,
+                spec: AV1.level() | nil,
+                default: nil,
                 description: """
-                Determines the level of the encoded stream. If not provided, it
+                Determines the level of the encoded stream. If set to nil, it
                 will be automatically detected from the input stream.
                 """
               ],
