@@ -456,7 +456,7 @@ defmodule Membrane.AV1.Encoder do
         payload: frame.payload,
         pts: Membrane.Time.nanoseconds(frame.pts),
         dts: Membrane.Time.nanoseconds(frame.dts),
-        metadata: %{av1: %{is_keyframe: frame.is_keyframe}}
+        metadata: %{av1: %{key_frame?: frame.is_keyframe}}
       }
     end)
   end
